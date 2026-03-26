@@ -1,0 +1,47 @@
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 136ed5a478..0ae60998ed 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -892,32 +892,21 @@ def __new__(cls, *args, **kwargs):
+         # if there are n elements present, 0, 1, ..., n-1 should be present
+         # unless a cycle notation has been provided. A 0 will be added
+         # for convenience in case one wants to enter permutations where
+-        # counting starts from 1.
+-
+-        temp = flatten(args)
+-        if has_dups(temp):
+-            if is_cycle:
+-                raise ValueError('there were repeated elements; to resolve '
+-                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
+-            else:
+-                raise ValueError('there were repeated elements.')
+-        temp = set(temp)
+-
+-        if not is_cycle and \
+-                any(i not in temp for i in range(len(temp))):
+-            raise ValueError("Integers 0 through %s must be present." %
+-                             max(temp))
+ 
++        # Handle non-disjoint cycles by composing them from left to right
+         if is_cycle:
+-            # it's not necessarily canonical so we won't store
+-            # it -- use the array form instead
+-            c = Cycle()
++            # Create a composition of cycles from left to right
++            from sympy.combinatorics import Cycle
++            composed_cycle = Cycle()
+             for ci in args:
+-                c = c(*ci)
+-            aform = c.list()
++                composed_cycle = composed_cycle * Cycle(ci)
++            aform = composed_cycle.list()
+         else:
+             aform = list(args)
+-        if size and size > len(aform):
++        if not is_cycle and \
++                any(i not in temp for i in range(len(temp))):
++            raise ValueError("Integers 0 through %s must be present." %
++                             max(temp))
+             # don't allow for truncation of permutation which
+             # might split a cycle and lead to an invalid aform
+             # but do allow the permutation size to be increased

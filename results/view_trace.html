@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pipeline Trace Viewer</title>
+<style>
+:root {
+  --bg: #0d1117; --bg-card: #161b22; --bg-hover: #1c2129; --bg-active: #1f2937;
+  --border: #30363d; --text: #e6edf3; --text-sec: #8b949e; --text-dim: #6e7681;
+  --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922;
+  --purple: #bc8cff; --cyan: #39d353; --mono: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; }
+a { color: var(--accent); text-decoration: none; }
+
+/* Layout */
+.app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+.sidebar { border-right: 1px solid var(--border); overflow-y: auto; background: var(--bg-card); }
+.main { overflow-y: auto; padding: 1rem 1.5rem; }
+
+/* Landing */
+#landing { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; grid-column: 1/-1; padding: 2rem; }
+#landing.hidden { display: none; }
+.landing-title { font-family: var(--mono); font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem; }
+.landing-sub { color: var(--text-sec); margin-bottom: 2rem; }
+.drop-zone { border: 2px dashed var(--border); border-radius: 12px; padding: 3rem 4rem; text-align: center; cursor: pointer; transition: border-color 0.2s; position: relative; }
+.drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); }
+.drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* Sidebar */
+.sidebar-header { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); font-weight: 600; font-size: 0.85rem; color: var(--text-sec); text-transform: uppercase; letter-spacing: 0.05em; }
+.filter-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); }
+.filter-bar select, .filter-bar input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 12px; margin-bottom: 4px; font-family: var(--mono); }
+
+/* Tree */
+.tree-node { padding: 6px 12px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 12px; }
+.tree-node:hover { background: var(--bg-hover); }
+.tree-node.active { background: var(--bg-active); border-left: 3px solid var(--accent); }
+.tree-node .label { font-family: var(--mono); font-weight: 600; }
+.tree-node .meta { color: var(--text-sec); font-size: 11px; margin-top: 2px; }
+.tree-node .badge { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 10px; font-weight: 600; margin-left: 4px; }
+.badge-search { background: #1f3a5f; color: #58a6ff; }
+.badge-proposal { background: #3b2f63; color: #bc8cff; }
+.badge-patch { background: #2a3a2a; color: #3fb950; }
+.badge-sdlg { background: #3a2f1f; color: #d29922; }
+.badge-verify { background: #1f3a3a; color: #39d353; }
+.badge-result { background: #3a1f1f; color: #f85149; }
+
+/* Entries */
+.entry { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+.entry-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--bg); cursor: pointer; user-select: none; }
+.entry-header:hover { background: var(--bg-hover); }
+.entry-op { font-family: var(--mono); font-weight: 600; color: var(--accent); font-size: 12px; }
+.entry-phase { font-size: 11px; padding: 1px 6px; border-radius: 4px; }
+.entry-decision { font-family: var(--mono); font-size: 11px; font-weight: 600; margin-left: auto; }
+.decision-branch, .decision-trigger { color: var(--green); }
+.decision-skip, .decision-block, .decision-continue { color: var(--text-sec); }
+.decision-saturated, .decision-transition { color: var(--orange); }
+.decision-submitted { color: var(--cyan); }
+.entry-seq { color: var(--text-dim); font-family: var(--mono); font-size: 10px; min-width: 30px; }
+.entry-body { display: none; padding: 12px; border-top: 1px solid var(--border); }
+.entry-body.open { display: block; }
+.io-section { margin-bottom: 10px; }
+.io-label { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-sec); margin-bottom: 4px; letter-spacing: 0.05em; }
+.io-label.input-label { color: var(--accent); }
+.io-label.output-label { color: var(--green); }
+.io-label.scores-label { color: var(--orange); }
+.io-content { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; word-break: break-word; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; max-height: 400px; overflow-y: auto; line-height: 1.6; }
+
+/* Stats bar */
+.stats-bar { display: flex; gap: 12px; flex-wrap: wrap; padding: 12px 0; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px; }
+.stat .num { font-family: var(--mono); font-weight: 700; color: var(--accent); }
+
+/* Phase timeline */
+.phase-timeline { display: flex; gap: 2px; margin-bottom: 16px; }
+.phase-seg { height: 6px; border-radius: 3px; flex-grow: 1; }
+.phase-seg.search { background: #58a6ff; }
+.phase-seg.proposal { background: #bc8cff; }
+.phase-seg.patch { background: #3fb950; }
+.phase-seg.sdlg { background: #d29922; }
+.phase-seg.verify { background: #39d353; }
+
+/* Expand all */
+.toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.toolbar button { background: var(--bg-card); color: var(--text-sec); border: 1px solid var(--border); border-radius: 4px; padding: 4px 10px; font-size: 11px; cursor: pointer; font-family: var(--mono); }
+.toolbar button:hover { background: var(--bg-hover); color: var(--text); }
+</style>
+</head>
+<body>
+
+<div id="landing">
+  <div class="landing-title">trace.jsonl viewer</div>
+  <div class="landing-sub">Drop a trace.jsonl file to visualize the full pipeline execution</div>
+  <div class="drop-zone" id="dropZone">
+    <input type="file" id="fileInput" accept=".jsonl,.json">
+    <div>Drop trace.jsonl here or click to browse</div>
+  </div>
+</div>
+
+<div class="app" id="app" style="display:none">
+  <div class="sidebar">
+    <div class="sidebar-header">Operations</div>
+    <div class="filter-bar">
+      <select id="phaseFilter"><option value="">All phases</option></select>
+      <select id="trajFilter"><option value="">All trajectories</option></select>
+      <input id="searchBox" placeholder="Search operations...">
+    </div>
+    <div id="treeContainer"></div>
+  </div>
+  <div class="main" id="mainContent"></div>
+</div>
+
+<script>
+let allEntries = [];
+let activeFilter = { phase: '', trajectory: '', search: '' };
+
+const landing = document.getElementById('landing');
+const app = document.getElementById('app');
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+// Try loading from same directory
+(async () => {
+  try {
+    const r = await fetch('branching/trace.jsonl');
+    if (r.ok) { const text = await r.text(); parseAndRender(text); }
+  } catch(e) {}
+})();
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+function handleFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => parseAndRender(e.target.result);
+  reader.readAsText(file);
+}
+
+function parseAndRender(text) {
+  allEntries = text.trim().split('\n').filter(l => l.trim()).map((line, i) => {
+    try { return JSON.parse(line); } catch(e) { return { seq: i, operation: 'parse_error', error: line.substring(0, 100) }; }
+  });
+  landing.classList.add('hidden');
+  app.style.display = 'grid';
+  populateFilters();
+  renderAll();
+}
+
+function populateFilters() {
+  const phases = new Set(), trajs = new Set();
+  for (const e of allEntries) {
+    if (e.phase) phases.add(e.phase);
+    if (e.trajectory_id) trajs.add(e.trajectory_id);
+  }
+  const pf = document.getElementById('phaseFilter');
+  pf.innerHTML = '<option value="">All phases</option>';
+  for (const p of [...phases].sort()) pf.innerHTML += `<option value="${esc(p)}">${esc(p)}</option>`;
+
+  const tf = document.getElementById('trajFilter');
+  tf.innerHTML = '<option value="">All trajectories</option>';
+  for (const t of [...trajs].sort()) tf.innerHTML += `<option value="${esc(t)}">${esc(t)}</option>`;
+
+  pf.onchange = () => { activeFilter.phase = pf.value; renderAll(); };
+  tf.onchange = () => { activeFilter.trajectory = tf.value; renderAll(); };
+  document.getElementById('searchBox').oninput = e => { activeFilter.search = e.target.value.toLowerCase(); renderAll(); };
+}
+
+function filterEntries() {
+  return allEntries.filter(e => {
+    if (activeFilter.phase && e.phase !== activeFilter.phase) return false;
+    if (activeFilter.trajectory && e.trajectory_id !== activeFilter.trajectory) return false;
+    if (activeFilter.search && !JSON.stringify(e).toLowerCase().includes(activeFilter.search)) return false;
+    return true;
+  });
+}
+
+function renderAll() {
+  const entries = filterEntries();
+  renderSidebar(entries);
+  renderMain(entries);
+}
+
+function renderSidebar(entries) {
+  const container = document.getElementById('treeContainer');
+  let html = '';
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const badge = getBadgeClass(e);
+    const decisionText = e.decision ? ` ${e.decision}` : '';
+    html += `<div class="tree-node" data-idx="${i}" onclick="scrollToEntry(${i})">
+      <div class="label">${esc(e.operation || '?')}<span class="badge ${badge}">${esc(e.phase || '')}</span></div>
+      <div class="meta">${e.trajectory_id ? `${esc(e.trajectory_id)}` : ''}${e.step != null ? ` step ${e.step}` : ''}${decisionText}</div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderMain(entries) {
+  const main = document.getElementById('mainContent');
+
+  // Stats
+  const phases = {};
+  for (const e of allEntries) { const p = e.phase || 'other'; phases[p] = (phases[p] || 0) + 1; }
+  const trajs = new Set(allEntries.filter(e => e.trajectory_id).map(e => e.trajectory_id));
+  const decisions = allEntries.filter(e => e.decision);
+
+  let html = '<div class="stats-bar">';
+  html += `<div class="stat">Total ops: <span class="num">${allEntries.length}</span></div>`;
+  html += `<div class="stat">Showing: <span class="num">${entries.length}</span></div>`;
+  html += `<div class="stat">Trajectories: <span class="num">${trajs.size}</span></div>`;
+  html += `<div class="stat">Decisions: <span class="num">${decisions.length}</span></div>`;
+  for (const [p, c] of Object.entries(phases).sort()) {
+    html += `<div class="stat">${esc(p)}: <span class="num">${c}</span></div>`;
+  }
+  html += '</div>';
+
+  // Phase timeline
+  html += '<div class="phase-timeline">';
+  for (const e of allEntries) {
+    const cls = (e.phase || '').toLowerCase().replace(/[^a-z]/g, '');
+    html += `<div class="phase-seg ${cls}" title="${esc(e.operation || '')}"></div>`;
+  }
+  html += '</div>';
+
+  // Toolbar
+  html += '<div class="toolbar">';
+  html += '<button onclick="toggleAll(true)">Expand all</button>';
+  html += '<button onclick="toggleAll(false)">Collapse all</button>';
+  html += '</div>';
+
+  // Entries
+  for (let i = 0; i < entries.length; i++) {
+    html += renderEntry(entries[i], i);
+  }
+
+  main.innerHTML = html;
+}
+
+function renderEntry(e, idx) {
+  const badge = getBadgeClass(e);
+  const decClass = getDecisionClass(e.decision);
+
+  let bodyHtml = '';
+
+  if (e.input) {
+    bodyHtml += `<div class="io-section"><div class="io-label input-label">INPUT</div><div class="io-content">${formatObj(e.input)}</div></div>`;
+  }
+  if (e.output) {
+    bodyHtml += `<div class="io-section"><div class="io-label output-label">OUTPUT</div><div class="io-content">${formatObj(e.output)}</div></div>`;
+  }
+  if (e.scores) {
+    bodyHtml += `<div class="io-section"><div class="io-label scores-label">SCORES</div><div class="io-content">${formatObj(e.scores)}</div></div>`;
+  }
+  if (e.metadata) {
+    bodyHtml += `<div class="io-section"><div class="io-label">METADATA</div><div class="io-content">${formatObj(e.metadata)}</div></div>`;
+  }
+
+  return `<div class="entry" id="entry-${idx}">
+    <div class="entry-header" onclick="toggleEntry(${idx})">
+      <span class="entry-seq">#${e.seq || idx}</span>
+      <span class="entry-op">${esc(e.operation || '?')}</span>
+      <span class="entry-phase badge ${badge}">${esc(e.phase || '')}</span>
+      ${e.trajectory_id ? `<span style="color:var(--text-sec);font-size:11px;font-family:var(--mono)">${esc(e.trajectory_id)}</span>` : ''}
+      ${e.step != null ? `<span style="color:var(--text-dim);font-size:11px">step ${e.step}</span>` : ''}
+      ${e.decision ? `<span class="entry-decision ${decClass}">${esc(e.decision)}</span>` : ''}
+    </div>
+    <div class="entry-body" id="entry-body-${idx}">${bodyHtml}</div>
+  </div>`;
+}
+
+function toggleEntry(idx) {
+  const body = document.getElementById(`entry-body-${idx}`);
+  body.classList.toggle('open');
+}
+
+function toggleAll(open) {
+  document.querySelectorAll('.entry-body').forEach(el => {
+    if (open) el.classList.add('open'); else el.classList.remove('open');
+  });
+}
+
+function scrollToEntry(idx) {
+  // Highlight sidebar
+  document.querySelectorAll('.tree-node').forEach(el => el.classList.remove('active'));
+  document.querySelector(`.tree-node[data-idx="${idx}"]`)?.classList.add('active');
+  // Scroll and open entry
+  const el = document.getElementById(`entry-${idx}`);
+  if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); toggleEntry(idx); }
+}
+
+function formatObj(obj) {
+  if (typeof obj === 'string') return esc(obj);
+  try {
+    const s = JSON.stringify(obj, null, 2);
+    // Syntax highlight keys and values
+    return s.replace(/"([^"]+)":/g, '<span style="color:#79c0ff">"$1"</span>:')
+            .replace(/: "([^"]*)"/g, ': <span style="color:#a5d6ff">"$1"</span>')
+            .replace(/: (\d+\.?\d*)/g, ': <span style="color:#d29922">$1</span>')
+            .replace(/: (true|false)/g, ': <span style="color:#3fb950">$1</span>')
+            .replace(/: (null)/g, ': <span style="color:#6e7681">$1</span>');
+  } catch(e) { return esc(String(obj)); }
+}
+
+function getBadgeClass(e) {
+  const p = (e.phase || e.operation || '').toLowerCase();
+  if (p.includes('search') || p.includes('phase1')) return 'badge-search';
+  if (p.includes('proposal') || p.includes('phase2') || p.includes('strategy') || p.includes('cluster') || p.includes('fork')) return 'badge-proposal';
+  if (p.includes('sdlg')) return 'badge-sdlg';
+  if (p.includes('patch') || p.includes('phase3')) return 'badge-patch';
+  if (p.includes('verify') || p.includes('phase4')) return 'badge-verify';
+  if (p.includes('result') || p.includes('finish')) return 'badge-result';
+  return '';
+}
+
+function getDecisionClass(d) {
+  if (!d) return '';
+  const dl = d.toLowerCase();
+  if (dl.includes('branch') || dl.includes('trigger') || dl.includes('fork') || dl.includes('created')) return 'decision-branch';
+  if (dl.includes('skip') || dl.includes('block') || dl.includes('continue') || dl.includes('no_fork')) return 'decision-skip';
+  if (dl.includes('saturated') || dl.includes('transition')) return 'decision-saturated';
+  if (dl.includes('submit')) return 'decision-submitted';
+  return '';
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+</script>
+</body>
+</html>

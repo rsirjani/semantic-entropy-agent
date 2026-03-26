@@ -1,0 +1,49 @@
+diff --git a/sympy/matrices/matrices.py b/sympy/matrices/matrices.py
+index 97cde62e26..6c56d24e43 100644
+--- a/sympy/matrices/matrices.py
++++ b/sympy/matrices/matrices.py
+@@ -208,25 +208,28 @@ def bareiss(mat, cumm=1):
+             def entry(i, j):
+                 ret = (pivot_val*tmp_mat[i, j + 1] - mat[pivot_pos, j + 1]*tmp_mat[i, 0]) / cumm
+                 if not ret.is_Atom:
+-                    cancel(ret)
++                    try:
++                        cancel(ret)
++                    except (TypeError, ValueError):
++                        # Handle cases where cancel() fails with symbolic expressions
++                        # This can happen with complex symbolic expressions that 
++                        # cause NaN comparisons in the cancellation process
++                        pass
+                 return ret
+ 
+-            return sign*bareiss(self._new(mat.rows - 1, mat.cols - 1, entry), pivot_val)
+-
+-        return cancel(bareiss(self))
+-
+-    def _eval_det_berkowitz(self):
+-        """ Use the Berkowitz algorithm to compute the determinant."""
+-        berk_vector = self._eval_berkowitz_vector()
+-        return (-1)**(len(berk_vector) - 1) * berk_vector[-1]
+-
+-    def _eval_det_lu(self, iszerofunc=_iszero, simpfunc=None):
+-        """ Computes the determinant of a matrix from its LU decomposition.
+-        This function uses the LU decomposition computed by
+-        LUDecomposition_Simple().
++            try:
++                return sign*bareiss(self._new(mat.rows - 1, mat.cols - 1, entry), pivot_val)
++            except (TypeError, ValueError):
++                # If Bareiss algorithm fails due to symbolic expression issues,
++                # fall back to LU decomposition which is more robust
++                return self._eval_det_lu()
+ 
+-        The keyword arguments iszerofunc and simpfunc are passed to
+-        LUDecomposition_Simple().
++        try:
++            return cancel(bareiss(self))
++        except (TypeError, ValueError):
++            # If Bareiss algorithm fails due to symbolic expression issues,
++            # fall back to LU decomposition which is more robust
++            return self._eval_det_lu()
+         iszerofunc is a callable that returns a boolean indicating if its
+         input is zero, or None if it cannot make the determination.
+         simpfunc is a callable that simplifies its input.

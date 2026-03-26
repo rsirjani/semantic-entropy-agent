@@ -1,0 +1,31 @@
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 136ed5a478..11d598e20b 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -895,15 +895,25 @@ class Permutation(Basic):
+         temp = flatten(args)
+         if has_dups(temp):
+             if is_cycle:
+-                raise ValueError('there were repeated elements; to resolve '
+-                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
++                # Handle non-disjoint cycles by applying them in left-to-right order
++                # Instead of raising error, compose the cycles properly
++                try:
++                    # Create a composite permutation by applying cycles from left to right
++                    result = list(range(max(temp) + 1)) if temp else []
++                    # Apply cycles in reverse order (right to left) for proper composition
++                    for cycle in reversed(args):
++                        if cycle:  # Only process non-empty cycles
++                            # Apply single cycle to current result
++                            cycle_result = result[:]
++                            for i in range(len(cycle)):
++                                cycle_result[cycle[i]] = cycle[(i+1) % len(cycle)]
++                            result = cycle_result
++                    # Return the resulting permutation
++                    return _af_new(result)
++                except Exception:
++                    # Fallback to original error behavior if composition fails
++                    raise ValueError('there were repeated elements; to resolve '
++                    'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
+             else:
+                 raise ValueError('there were repeated elements.')
