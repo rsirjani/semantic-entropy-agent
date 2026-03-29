@@ -1,0 +1,117 @@
+{
+  "instance_id": "sympy__sympy-15345",
+  "elapsed_seconds": 1185.2301630973816,
+  "total_steps": 533,
+  "total_trajectories": 9,
+  "completed_trajectories": 9,
+  "submitted_trajectories": 9,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..0b80f5125 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -9,6 +9,8 @@\n \n # Used in MCodePrinter._print_Function(self)\n known_functions = {\n+    \"Max\": [(lambda *x: True, \"Max\")],\n+    \"Min\": [(lambda *x: True, \"Min\")],\n     \"exp\": [(lambda x: True, \"Exp\")],\n     \"log\": [(lambda x: True, \"Log\")],\n     \"sin\": [(lambda x: True, \"Sin\")],\n",
+      "submitted": true,
+      "steps": 127,
+      "parent_id": null,
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Modify `known_functions` dictionary to include `Max` and `Min` entries \u2014 Add `\"Max\": [(lambda x: True, \"Max\")]` and `\"Min\": [(lambda x: True, \"Min\")]` to the `known_functions` dictionary to ensure these functions are properly recognized and converted to Mathematica syntax.",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..ce2c00013 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -94,12 +94,17 @@ def _print_list(self, expr):\n     _print_Tuple = _print_list\n \n     def _print_Function(self, expr):\n-        if expr.func.__name__ in self.known_functions:\n-            cond_mfunc = self.known_functions[expr.func.__name__]\n+        name = expr.func.__name__\n+        if name == \"Max\":\n+            return \"Max[%s]\" % self.stringify(expr.args, \", \")\n+        elif name == \"Min\":\n+            return \"Min[%s]\" % self.stringify(expr.args, \", \")\n+        if name in self.known_functions:\n+            cond_mfunc = self.known_functions[name]\n             for cond, mfunc in cond_mfunc:\n                 if cond(*expr.args):\n                     return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n-        return expr.func.__name__ + \"[%s]\" % self.stringify(expr.args, \", \")\n+        return name + \"[%s]\" % self.stringify(expr.args, \", \")\n \n     def _print_Integral(self, expr):\n         if len(expr.variables) == 1 and not expr.limits[0][1:]:\n@@ -111,6 +116,12 @@ def _print_Integral(self, expr):\n     def _print_Sum(self, expr):\n         return \"Hold[Sum[\" + ', '.join(self.doprint(a) for a in expr.args) + \"]]\"\n \n+    def _print_Max(self, expr):\n+        return \"Max[%s]\" % self.stringify(expr.args, \", \")\n+\n+    def _print_Min(self, expr):\n+        return \"Min[%s]\" % self.stringify(expr.args, \", \")\n+\n     def _print_Derivative(self, expr):\n         dexpr = expr.expr\n         dvars = [i[0] if i[1] == 1 else i for i in expr.variable_count]\n",
+      "submitted": true,
+      "steps": 37,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Modify `_print_Function` method to add explicit `Max`/`Min` handling before fallback \u2014 Insert conditional checks for `name == \"Max\"` and `name == \"Min\"` at the beginning of the `_print_Function` method to return `\"Max(...)\"` or `\"Min(...)\"` respectively, bypassing the default behavior.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/mathematica.py` - Modify `_print_Function` method to add explicit `Max`/`Min` handling before fallback \u2014 Insert conditional checks for `name == \"Max\"` and `name == \"Min\"` at t"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..406d468b7 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -94,12 +94,27 @@ def _print_list(self, expr):\n     _print_Tuple = _print_list\n \n     def _print_Function(self, expr):\n+        # Handle special cases for Max and Min functions\n+        if expr.func.__name__ == \"Max\":\n+            return \"Max[\" + self.stringify(expr.args, \", \") + \"]\"\n+        elif expr.func.__name__ == \"Min\":\n+            return \"Min[\" + self.stringify(expr.args, \", \") + \"]\"\n+        \n+        # Use the standard dispatch mechanism for other functions\n         if expr.func.__name__ in self.known_functions:\n             cond_mfunc = self.known_functions[expr.func.__name__]\n             for cond, mfunc in cond_mfunc:\n                 if cond(*expr.args):\n                     return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n-        return expr.func.__name__ + \"[%s]\" % self.stringify(expr.args, \", \")\n+        \n+        # Default case - try to match known functions or fallback to name\n+        func_name = expr.func.__name__\n+        if func_name in self.known_functions:\n+            # This shouldn't happen due to earlier check, but just in case\n+            return \"%s[%s]\" % (func_name, self.stringify(expr.args, \", \"))\n+        \n+        # For unknown functions, use the standard approach\n+        return func_name + \"[\" + self.stringify(expr.args, \", \") + \"]\"\n \n     def _print_Integral(self, expr):\n         if len(expr.variables) == 1 and not expr.limits[0][1:]:\n@@ -111,11 +126,12 @@ def _print_Integral(self, expr):\n     def _print_Sum(self, expr):\n         return \"Hold[Sum[\" + ', '.join(self.doprint(a) for a in expr.args) + \"]]\"\n \n-    def _print_Derivative(self, expr):\n-        dexpr = expr.expr\n-        dvars = [i[0] if i[1] == 1 else i for i in expr.variable_count]\n-        return \"Hold[D[\" + ', '.join(self.doprint(a) for a in [dexpr] + dvars) + \"]]\"\n \n+    def _print_Max(self, expr):\n+        return \"Max[\" + self.stringify(expr.args, \", \") + \"]\"\n+\n+    def _print_Min(self, expr):\n+        return \"Min[\" + self.stringify(expr.args, \", \") + \"]\"\n \n def mathematica_code(expr, **settings):\n     r\"\"\"Converts an expr to a string of the Wolfram Mathematica code\n",
+      "submitted": true,
+      "steps": 86,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Create a dedicated dispatcher mechanism \u2014 Replace the current `_print_Function` method with a new method that uses a dispatch table mapping function names directly to their Mathematica representations, including explicit mappings for `\"Max\"` and `\"Min\"` functions.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/mathematica.py` - Create a dedicated dispatcher mechanism \u2014 Replace the current `_print_Function` method with a new method that uses a dispatch table mapping function names di"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2_sdlg_1",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..4b7d98136 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -94,6 +94,22 @@ def _print_list(self, expr):\n     _print_Tuple = _print_list\n \n     def _print_Function(self, expr):\n+        # Handle special Mathematica functions\n+        func_name = expr.func.__name__\n+\n+        # Special handling for Max and Min to use square brackets\n+        if func_name in (\"Max\", \"Min\"):\n+            return \"%s[%s]\" % (func_name, self.stringify(expr.args, \", \"))\n+\n+        # Check known functions\n+        if func_name in self.known_functions:\n+            cond_mfunc = self.known_functions[func_name]\n+            for cond, mfunc in cond_mfunc:\n+                if cond(*expr.args):\n+                    return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n+\n+        # Default behavior for other functions\n+        return \"%s[%s]\" % (func_name, self.stringify(expr.args, \", \"))\n         if expr.func.__name__ in self.known_functions:\n             cond_mfunc = self.known_functions[expr.func.__name__]\n             for cond, mfunc in cond_mfunc:\n",
+      "submitted": true,
+      "steps": 20,
+      "parent_id": "t0_strategy_2",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Create a dedicated dispatcher mechanism \u2014 Replace the current `_print_Function` method with a new method that uses a dispatch table mapping function names directly to their Mathematica representations, including explicit mappings for `\"Max\"` and `\"Min\"` functions.",
+      "branch_info": {
+        "type": "sdlg",
+        "rank": 1
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..cd797e098 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -8,7 +8,7 @@\n from sympy.printing.precedence import precedence\n \n # Used in MCodePrinter._print_Function(self)\n-known_functions = {\n+    \"Max\": [(lambda x: True, \"Max\")],\n     \"exp\": [(lambda x: True, \"Exp\")],\n     \"log\": [(lambda x: True, \"Log\")],\n     \"sin\": [(lambda x: True, \"Sin\")],\n@@ -32,6 +32,7 @@\n     \"acsch\": [(lambda x: True, \"ArcCsch\")],\n     \"conjugate\": [(lambda x: True, \"Conjugate\")],\n \n+    \"Max\": [(lambda x: True, \"Max\")],\n }\n \n \n",
+      "submitted": true,
+      "steps": 42,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Enhance the inheritance chain by overriding `__new__` for Max class \u2014 Create a custom `Max` class that overrides `__new__` to inject proper Mathematica formatting, ensuring any instance of `Max` will automatically generate correct Mathematica code through the normal printing process.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/mathematica.py` - Enhance the inheritance chain by overriding `__new__` for Max class \u2014 Create a custom `Max` class that overrides `__new__` to inject proper Mathematica forma"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..885ae558a 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -99,6 +99,9 @@ def _print_Function(self, expr):\n             for cond, mfunc in cond_mfunc:\n                 if cond(*expr.args):\n                     return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n+        # Handle Max and Min specially to ensure correct Mathematica syntax\n+        if expr.func.__name__ in (\"Max\", \"Min\"):\n+            return \"%s[%s]\" % (expr.func.__name__, self.stringify(expr.args, \", \"))\n         return expr.func.__name__ + \"[%s]\" % self.stringify(expr.args, \", \")\n \n     def _print_Integral(self, expr):\n",
+      "submitted": true,
+      "steps": 50,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Introduce a pre-processing step using AST transformation \u2014 Add a preprocessing utility function that scans expressions for `Max` and `Min` nodes and converts them into a format that will be correctly interpreted by the existing `MCodePrinter`, potentially modifying how function arguments are ordered or formatted.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/mathematica.py` - Introduce a pre-processing step using AST transformation \u2014 Add a preprocessing utility function that scans expressions for `Max` and `Min` nodes and converts"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4_sdlg_1",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..eb9b2cd5e 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -88,25 +88,21 @@ def _print_Infinity(self, expr):\n     def _print_NegativeInfinity(self, expr):\n         return '-Infinity'\n \n-    def _print_list(self, expr):\n-        return '{' + ', '.join(self.doprint(a) for a in expr) + '}'\n-    _print_tuple = _print_list\n-    _print_Tuple = _print_list\n-\n     def _print_Function(self, expr):\n         if expr.func.__name__ in self.known_functions:\n             cond_mfunc = self.known_functions[expr.func.__name__]\n             for cond, mfunc in cond_mfunc:\n                 if cond(*expr.args):\n                     return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n+        # Handle Max and Min specially for Mathematica - FIXED\n+        if expr.func.__name__ in (\"Max\", \"Min\"):\n+            return \"%s[%s]\" % (expr.func.__name__, self.stringify(expr.args, \", \"))\n         return expr.func.__name__ + \"[%s]\" % self.stringify(expr.args, \", \")\n \n-    def _print_Integral(self, expr):\n-        if len(expr.variables) == 1 and not expr.limits[0][1:]:\n-            args = [expr.args[0], expr.variables[0]]\n-        else:\n-            args = expr.args\n-        return \"Hold[Integrate[\" + ', '.join(self.doprint(a) for a in args) + \"]]\"\n+    def _print_list(self, expr):\n+        return '{' + ', '.join(self.doprint(a) for a in expr) + '}'\n+    _print_tuple = _print_list\n+    _print_Tuple = _print_list\n \n     def _print_Sum(self, expr):\n         return \"Hold[Sum[\" + ', '.join(self.doprint(a) for a in expr.args) + \"]]\"\n",
+      "submitted": true,
+      "steps": 67,
+      "parent_id": "t0_strategy_4",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Introduce a pre-processing step using AST transformation \u2014 Add a preprocessing utility function that scans expressions for `Max` and `Min` nodes and converts them into a format that will be correctly interpreted by the existing `MCodePrinter`, potentially modifying how function arguments are ordered or formatted.",
+      "branch_info": {
+        "type": "sdlg",
+        "rank": 1
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4_sdlg_2",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..889ba4ab9 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -94,6 +94,10 @@ def _print_list(self, expr):\n     _print_Tuple = _print_list\n \n     def _print_Function(self, expr):\n+        # Handle Max and Min specially to ensure Mathematica format\n+        if expr.func.__name__ in ('Max', 'Min'):\n+            return \"%s[%s]\" % (expr.func.__name__, self.stringify(expr.args, \", \"))\n+        \n         if expr.func.__name__ in self.known_functions:\n             cond_mfunc = self.known_functions[expr.func.__name__]\n             for cond, mfunc in cond_mfunc:\n",
+      "submitted": true,
+      "steps": 55,
+      "parent_id": "t0_strategy_4",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Introduce a pre-processing step using AST transformation \u2014 Add a preprocessing utility function that scans expressions for `Max` and `Min` nodes and converts them into a format that will be correctly interpreted by the existing `MCodePrinter`, potentially modifying how function arguments are ordered or formatted.",
+      "branch_info": {
+        "type": "sdlg",
+        "rank": 2
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4_sdlg_3",
+      "patch": "diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py\nindex ea7e3a2d9..f3f3d4fa6 100644\n--- a/sympy/printing/mathematica.py\n+++ b/sympy/printing/mathematica.py\n@@ -94,13 +94,16 @@ def _print_list(self, expr):\n     _print_Tuple = _print_list\n \n     def _print_Function(self, expr):\n+        # Handle Max and Min specially to ensure correct Mathematica syntax\n+        if expr.func.__name__ in [\"Max\", \"Min\"]:\n+            return \"%s[%s]\" % (expr.func.__name__, self.stringify(expr.args, \", \"))\n+\n         if expr.func.__name__ in self.known_functions:\n             cond_mfunc = self.known_functions[expr.func.__name__]\n             for cond, mfunc in cond_mfunc:\n                 if cond(*expr.args):\n                     return \"%s[%s]\" % (mfunc, self.stringify(expr.args, \", \"))\n         return expr.func.__name__ + \"[%s]\" % self.stringify(expr.args, \", \")\n-\n     def _print_Integral(self, expr):\n         if len(expr.variables) == 1 and not expr.limits[0][1:]:\n             args = [expr.args[0], expr.variables[0]]\n",
+      "submitted": true,
+      "steps": 81,
+      "parent_id": "t0_strategy_4",
+      "strategy": "`/testbed/sympy/printing/mathematica.py` - Introduce a pre-processing step using AST transformation \u2014 Add a preprocessing utility function that scans expressions for `Max` and `Min` nodes and converts them into a format that will be correctly interpreted by the existing `MCodePrinter`, potentially modifying how function arguments are ordered or formatted.",
+      "branch_info": {
+        "type": "sdlg",
+        "rank": 3
+      }
+    }
+  ],
+  "branching_events": 2,
+  "strategies_proposed": 9
+}

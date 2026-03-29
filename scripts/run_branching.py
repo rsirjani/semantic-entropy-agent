@@ -73,21 +73,23 @@ def find_eval_image(instance_id: str) -> str:
     """
     import subprocess
 
-    # Try exact match first
+    # Try exact match first (old format)
     candidate = f"sweb.eval.x86_64.{instance_id}:latest"
     r = subprocess.run(["docker", "image", "inspect", candidate],
-                       capture_output=True, timeout=10)
+                       capture_output=True, timeout=30)
     if r.returncode == 0:
         return candidate
 
-    # Try swebench/ prefix with repo hash pattern
+    # Search all Docker images for matching eval image (new swebench/ format)
     # instance_id like "sympy__sympy-12481" → search for images containing "sympy-12481"
     short_id = instance_id.split("__")[-1]  # "sympy-12481"
     r = subprocess.run(["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
-                       capture_output=True, text=True, timeout=10)
-    for line in r.stdout.strip().split("\n"):
-        if short_id in line and "sweb.eval" in line:
-            return line.strip()
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode == 0:
+        for line in r.stdout.strip().splitlines():
+            line = line.strip()
+            if short_id in line and "sweb.eval" in line:
+                return line
 
     # Fallback to original format
     return candidate

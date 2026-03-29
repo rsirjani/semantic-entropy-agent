@@ -1,0 +1,124 @@
+2026-03-28 21:45:15,796 - INFO - Environment image sweb.env.py.x86_64.c795f4b88616b8462021ed:latest found for sympy__sympy-15345
+Building instance image sweb.eval.x86_64.sympy__sympy-15345:latest for sympy__sympy-15345
+2026-03-28 21:45:15,835 - INFO - Image sweb.eval.x86_64.sympy__sympy-15345:latest already exists, skipping build.
+2026-03-28 21:45:15,836 - INFO - Creating container for sympy__sympy-15345...
+2026-03-28 21:45:15,894 - INFO - Container for sympy__sympy-15345 created: 9f92af685cced5e051c3a3d590d7d25fcfa48a5d78dc25e1709be29d8d2b56e7
+2026-03-28 21:45:16,151 - INFO - Container for sympy__sympy-15345 started: 9f92af685cced5e051c3a3d590d7d25fcfa48a5d78dc25e1709be29d8d2b56e7
+2026-03-28 21:45:16,151 - INFO - Intermediate patch for sympy__sympy-15345 written to logs\run_evaluation\branching_traj_t0_strategy_2\qwen3-coder-30b-a3b-awq-branching-t0_strategy_2\sympy__sympy-15345\patch.diff, now applying to container...
+2026-03-28 21:45:16,366 - INFO - Failed to apply patch to container: git apply --verbose
+2026-03-28 21:45:16,458 - INFO - Failed to apply patch to container: git apply --verbose --reject
+2026-03-28 21:45:16,562 - INFO - >>>>> Applied Patch:
+(Stripping trailing CRs from patch; use --binary to disable.)
+patching file sympy/printing/mathematica.py
+
+2026-03-28 21:45:16,938 - INFO - Git diff before:
+diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py
+index ea7e3a2d9..406d468b7 100644
+--- a/sympy/printing/mathematica.py
++++ b/sympy/printing/mathematica.py
+@@ -94,12 +94,27 @@ def _print_list(self, expr):
+     _print_Tuple = _print_list
+ 
+     def _print_Function(self, expr):
++        # Handle special cases for Max and Min functions
++        if expr.func.__name__ == "Max":
++            return "Max[" + self.stringify(expr.args, ", ") + "]"
++        elif expr.func.__name__ == "Min":
++            return "Min[" + self.stringify(expr.args, ", ") + "]"
++        
++        # Use the standard dispatch mechanism for other functions
+         if expr.func.__name__ in self.known_functions:
+             cond_mfunc = self.known_functions[expr.func.__name__]
+             for cond, mfunc in cond_mfunc:
+                 if cond(*expr.args):
+                     return "%s[%s]" % (mfunc, self.stringify(expr.args, ", "))
+-        return expr.func.__name__ + "[%s]" % self.stringify(expr.args, ", ")
++        
++        # Default case - try to match known functions or fallback to name
++        func_name = expr.func.__name__
++        if func_name in self.known_functions:
++            # This shouldn't happen due to earlier check, but just in case
++            return "%s[%s]" % (func_name, self.stringify(expr.args, ", "))
++        
++        # For unknown functions, use the standard approach
++        return func_name + "[" + self.stringify(expr.args, ", ") + "]"
+ 
+     def _print_Integral(self, expr):
+         if len(expr.variables) == 1 and not expr.limits[0][1:]:
+@@ -111,11 +126,12 @@ def _print_Integral(self, expr):
+     def _print_Sum(self, expr):
+         return "Hold[Sum[" + ', '.join(self.doprint(a) for a in expr.args) + "]]"
+ 
+-    def _print_Derivative(self, expr):
+-        dexpr = expr.expr
+-        dvars = [i[0] if i[1] == 1 else i for i in expr.variable_count]
+-        return "Hold[D[" + ', '.join(self.doprint(a) for a in [dexpr] + dvars) + "]]"
+ 
++    def _print_Max(self, expr):
++        return "Max[" + self.stringify(expr.args, ", ") + "]"
++
++    def _print_Min(self, expr):
++        return "Min[" + self.stringify(expr.args, ", ") + "]"
+ 
+ def mathematica_code(expr, **settings):
+     r"""Converts an expr to a string of the Wolfram Mathematica code
+2026-03-28 21:45:16,938 - INFO - Eval script for sympy__sympy-15345 written to logs\run_evaluation\branching_traj_t0_strategy_2\qwen3-coder-30b-a3b-awq-branching-t0_strategy_2\sympy__sympy-15345\eval.sh; copying to container...
+2026-03-28 21:45:18,259 - INFO - Test runtime: 1.24 seconds
+2026-03-28 21:45:18,260 - INFO - Test output for sympy__sympy-15345 written to logs\run_evaluation\branching_traj_t0_strategy_2\qwen3-coder-30b-a3b-awq-branching-t0_strategy_2\sympy__sympy-15345\test_output.txt
+2026-03-28 21:45:18,349 - INFO - Git diff after:
+diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py
+index ea7e3a2d9..406d468b7 100644
+--- a/sympy/printing/mathematica.py
++++ b/sympy/printing/mathematica.py
+@@ -94,12 +94,27 @@ def _print_list(self, expr):
+     _print_Tuple = _print_list
+ 
+     def _print_Function(self, expr):
++        # Handle special cases for Max and Min functions
++        if expr.func.__name__ == "Max":
++            return "Max[" + self.stringify(expr.args, ", ") + "]"
++        elif expr.func.__name__ == "Min":
++            return "Min[" + self.stringify(expr.args, ", ") + "]"
++        
++        # Use the standard dispatch mechanism for other functions
+         if expr.func.__name__ in self.known_functions:
+             cond_mfunc = self.known_functions[expr.func.__name__]
+             for cond, mfunc in cond_mfunc:
+                 if cond(*expr.args):
+                     return "%s[%s]" % (mfunc, self.stringify(expr.args, ", "))
+-        return expr.func.__name__ + "[%s]" % self.stringify(expr.args, ", ")
++        
++        # Default case - try to match known functions or fallback to name
++        func_name = expr.func.__name__
++        if func_name in self.known_functions:
++            # This shouldn't happen due to earlier check, but just in case
++            return "%s[%s]" % (func_name, self.stringify(expr.args, ", "))
++        
++        # For unknown functions, use the standard approach
++        return func_name + "[" + self.stringify(expr.args, ", ") + "]"
+ 
+     def _print_Integral(self, expr):
+         if len(expr.variables) == 1 and not expr.limits[0][1:]:
+@@ -111,11 +126,12 @@ def _print_Integral(self, expr):
+     def _print_Sum(self, expr):
+         return "Hold[Sum[" + ', '.join(self.doprint(a) for a in expr.args) + "]]"
+ 
+-    def _print_Derivative(self, expr):
+-        dexpr = expr.expr
+-        dvars = [i[0] if i[1] == 1 else i for i in expr.variable_count]
+-        return "Hold[D[" + ', '.join(self.doprint(a) for a in [dexpr] + dvars) + "]]"
+ 
++    def _print_Max(self, expr):
++        return "Max[" + self.stringify(expr.args, ", ") + "]"
++
++    def _print_Min(self, expr):
++        return "Min[" + self.stringify(expr.args, ", ") + "]"
+ 
+ def mathematica_code(expr, **settings):
+     r"""Converts an expr to a string of the Wolfram Mathematica code
+2026-03-28 21:45:18,349 - INFO - Grading answer for sympy__sympy-15345...
+2026-03-28 21:45:18,351 - INFO - report: {'sympy__sympy-15345': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_Function']}, 'PASS_TO_PASS': {'success': [], 'failure': ['test_Integer', 'test_Rational', 'test_Pow', 'test_Mul', 'test_constants', 'test_containers', 'test_Integral', 'test_Derivative']}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-15345: resolved: False
+2026-03-28 21:45:18,352 - INFO - Attempting to stop container sweb.eval.sympy__sympy-15345.branching_traj_t0_strategy_2...
+2026-03-28 21:45:33,606 - INFO - Attempting to remove container sweb.eval.sympy__sympy-15345.branching_traj_t0_strategy_2...
+2026-03-28 21:45:33,664 - INFO - Container sweb.eval.sympy__sympy-15345.branching_traj_t0_strategy_2 removed.

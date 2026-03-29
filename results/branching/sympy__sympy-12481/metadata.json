@@ -1,69 +1,60 @@
 {
   "instance_id": "sympy__sympy-12481",
-  "elapsed_seconds": 653.0197992324829,
-  "total_steps": 275,
-  "total_trajectories": 7,
-  "completed_trajectories": 7,
-  "submitted_trajectories": 7,
+  "elapsed_seconds": 2101.0457434654236,
+  "total_steps": 844,
+  "total_trajectories": 6,
+  "completed_trajectories": 6,
+  "submitted_trajectories": 4,
   "patches": [
     {
-      "trajectory_id": "t0",
-      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..a87b80f0c5 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -896,6 +896,26 @@ def __new__(cls, *args, **kwargs):\n \n         temp = flatten(args)\n         if has_dups(temp):\n+            # Handle overlapping cycles by processing them left-to-right\n+            # Instead of raising error, try to process cycles as functions\n+            # This allows non-disjoint cycles to be combined properly\n+            try:\n+                # Create a temporary permutation by applying cycles left-to-right\n+                c = Cycle()\n+                for ci in args:\n+                    c = c(*ci)\n+                # If successful, use the computed result\n+                aform = c.list()\n+                if size and size > len(aform):\n+                    aform.extend(list(range(len(aform), size)))\n+                size = len(aform)\n+                obj = Basic.__new__(cls, aform)\n+                obj._array_form = aform\n+                obj._size = size\n+                return obj\n+            except Exception:\n+                # Fall back to original error handling\n+                pass\n             if is_cycle:\n                 raise ValueError('there were repeated elements; to resolve '\n                 'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n",
-      "submitted": true,
-      "steps": 59,
-      "parent_id": null,
-      "strategy": "`permutation.py` - `Permutation.__init__` method \u2014 Replace the current cycle validation logic with a cycle merging approach that automatically combines overlapping cycles before processing them: ```python # In Permutation.__init__, replace validation section with: def __init__(self, cycles=None): if cycles is None: cycles = [] # Normalize cycles by merging overlapping ones normalized_cycles = self._merge_overlapping_cycles(cycles) # Process merged cycles instead of rejecting non-disjoint ones se",
-      "branch_info": {}
-    },
-    {
       "trajectory_id": "t0_strategy_1",
-      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..4ee753f6f8 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -895,9 +895,6 @@ def __new__(cls, *args, **kwargs):\n         # counting starts from 1.\n \n         temp = flatten(args)\n-        if has_dups(temp):\n-            if is_cycle:\n-                raise ValueError('there were repeated elements; to resolve '\n                 'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n             else:\n                 raise ValueError('there were repeated elements.')\n",
+      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..faeaf37b0f 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -908,16 +908,24 @@ def __new__(cls, *args, **kwargs):\n             raise ValueError(\"Integers 0 through %s must be present.\" %\n                              max(temp))\n \n+        if size and size > len(aform):\n         if is_cycle:\n-            # it's not necessarily canonical so we won't store\n-            # it -- use the array form instead\n-            c = Cycle()\n+            # Handle non-disjoint cycles by applying them in left-to-right order\n+            # Create identity permutation first\n+            aform = list(range(len(temp)))\n+            # Apply cycles from left to right (as per mathematical convention)\n             for ci in args:\n-                c = c(*ci)\n-            aform = c.list()\n+                # Convert cycle to mapping\n+                cycle_map = {}\n+                for i in range(len(ci)):\n+                    cycle_map[ci[i]] = ci[(i+1) % len(ci)]\n+                # Apply this cycle to current permutation\n+                new_aform = aform[:]\n+                for k, v in cycle_map.items():\n+                    new_aform[k] = v\n+                aform = new_aform\n         else:\n             aform = list(args)\n-        if size and size > len(aform):\n             # don't allow for truncation of permutation which\n             # might split a cycle and lead to an invalid aform\n             # but do allow the permutation size to be increased\n",
       "submitted": true,
-      "steps": 28,
+      "steps": 95,
       "parent_id": "t0",
-      "strategy": "`permutation.py` - `Permutation._validate_cycles` helper method \u2014 Remove the validation entirely and let cycles pass through to be processed in their natural order: ```python # In Permutation._validate_cycles, replace the entire method body: def _validate_cycles(self, cycles): # Remove all validation logic - allow any input to pass through pass ```",
+      "strategy": "`cycle_utils.py` - `normalize_cycles` helper function \u2014 Add a new preprocessing function that takes raw cycle input and automatically merges overlapping cycles into their canonical form, then pass this normalized input to the Permutation constructor instead of allowing invalid inputs to reach it.",
       "branch_info": {
         "type": "strategy",
-        "strategy": "`permutation.py` - `Permutation._validate_cycles` helper method \u2014 Remove the validation entirely and let cycles pass through to be processed in their natural order: ```python # In Permutation._validat"
+        "strategy": "`cycle_utils.py` - `normalize_cycles` helper function \u2014 Add a new preprocessing function that takes raw cycle input and automatically merges overlapping cycles into their canonical form, then pass thi"
       }
     },
     {
-      "trajectory_id": "t0_strategy_1_sdlg_1",
-      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..8c18f5a679 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -895,7 +895,7 @@ def __new__(cls, *args, **kwargs):\n         # counting starts from 1.\n \n         temp = flatten(args)\n-        if has_dups(temp):\n+        if False and has_dups(temp):\n             if is_cycle:\n                 raise ValueError('there were repeated elements; to resolve '\n                 'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n",
-      "submitted": true,
-      "steps": 34,
-      "parent_id": "t0_strategy_1",
-      "strategy": "`permutation.py` - `Permutation._validate_cycles` helper method \u2014 Remove the validation entirely and let cycles pass through to be processed in their natural order: ```python # In Permutation._validate_cycles, replace the entire method body: def _validate_cycles(self, cycles): # Remove all validation logic - allow any input to pass through pass ```",
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..196614e039 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -897,10 +897,10 @@ def __new__(cls, *args, **kwargs):\n         temp = flatten(args)\n         if has_dups(temp):\n             if is_cycle:\n-                raise ValueError('there were repeated elements; to resolve '\n+                \n                 'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n             else:\n-                raise ValueError('there were repeated elements.')\n+                \n         temp = set(temp)\n \n         if not is_cycle and \\",
+      "submitted": false,
+      "steps": 251,
+      "parent_id": "t0",
+      "strategy": "`permutation.py` - `Permutation._validate_cycles` method \u2014 Modify the validation logic to be more permissive and instead of raising ValueError, it should transform overlapping cycles into equivalent disjoint ones using a union operation on the cycle elements.",
       "branch_info": {
-        "type": "sdlg",
-        "rank": 1
+        "type": "strategy",
+        "strategy": "`permutation.py` - `Permutation._validate_cycles` method \u2014 Modify the validation logic to be more permissive and instead of raising ValueError, it should transform overlapping cycles into equivalent d"
       }
     },
     {
       "trajectory_id": "t0_strategy_3",
-      "patch": "diff --git a/sympy/combinatorics/cycle_utils.py b/sympy/combinatorics/cycle_utils.py\nnew file mode 100644\nindex 0000000..b8c8b8c\n--- /dev/null\n+++ b/sympy/combinatorics/cycle_utils.py\n@@ -0,0 +1,50 @@\n+\"\"\"\n+Utility functions for handling permutation cycles.\n+\"\"\"\n+\n+def normalize_disjoint_cycles(cycles):\n+    \"\"\"\n+    Normalize a list of cycles by merging overlapping cycles.\n+    \n+    When cycles overlap (are not disjoint), they should be applied \n+    from left to right to produce a single permutation.\n+    \n+    Parameters\n+    ----------\n+    cycles : list of lists\n+        List of cycles to normalize\n+        \n+    Returns\n+    -------\n+    list of lists\n+        Normalized cycles that are disjoint\n+    \"\"\"\n+    if not cycles:\n+        return []\n+    \n+    # Handle the case where cycles are not disjoint by applying them\n+    # from left to right to get the resulting permutation\n+    # Determine the maximum element to know the size\n+    max_element = 0\n+    for cycle in cycles:\n+        if cycle:\n+            max_element = max(max_element, max(cycle))\n+    \n+    n = max_element + 1 if max_element >= 0 else 0\n+    \n+    # Create identity permutation\n+    result = list(range(n))\n+    \n+    # Apply cycles from left to right\n+    for cycle in cycles:\n+        if not cycle:  # Skip empty cycles\n+            continue\n+        # Create a temporary permutation for this cycle\n+        temp = list(range(n))\n+        # Apply the cycle: for each element in the cycle, map it to the next element\n+        for i in range(len(cycle)):\n+            temp[cycle[i]] = cycle[(i + 1) % len(cycle)]\n+        # Compose with result: result = temp o result  \n+        # This means result[i] = temp[result[i]]\n+        new_result = [temp[result[i]] for i in range(n)]\n+        result = new_result\n+    \n+    # Convert back to cycle notation\n+    return _cycles_from_array(result)\n+\n+\n+def _cycles_from_array(array_form):\n+    \"\"\"\n+    Convert array form to cycle notation.\n+    \n+    Parameters\n+    ----------\n+    array_form : list\n+        Array form of permutation\n+        \n+    Returns\n+    -------\n+    list of lists\n+        Cycle notation representation\n+    \"\"\"\n+    n = len(array_form)\n+    visited = [False] * n\n+    cycles = []\n+    \n+    for i in range(n):\n+        if not visited[i]:\n+            if array_form[i] != i:\n+                # Start a new cycle\n+                cycle = []\n+                current = i\n+                while not visited[current]:\n+                    visited[current] = True\n+                    cycle.append(current)\n+                    current = array_form[current]\n+                if len(cycle) > 1:  # Only include non-trivial cycles\n+                    cycles.append(cycle)\n+    \n+    return cycles\n",
+      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 1234567..89abcd0 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -2890,10 +2890,15 @@ def _handle_non_disjoint_cycles(cycles):\n     \"\"\"\n     Handle non-disjoint cycles by composing them from left to right.\n     This replaces the previous ValueError for non-disjoint cycles.\n     \"\"\"\n+    # Ensure we have proper imports\n+    from sympy.combinatorics import Permutation\n+\n     # Handle empty cycles\n     if not cycles:\n         return Permutation([])\n \n+    # For non-disjoint cycles, compose from left to right\n+    result = Permutation([])\n+    for cycle in cycles:\n+        if cycle:  # Non-empty cycle\n+            cycle_perm = Permutation(cycle)\n+            # Apply from left to right (composition)\n+            result = cycle_perm * result\n+    return result\n+\n",
       "submitted": true,
-      "steps": 50,
+      "steps": 147,
       "parent_id": "t0",
-      "strategy": "`cycle_utils.py` - New utility module with `normalize_disjoint_cycles` function \u2014 Create a separate module that handles cycle normalization and inject it as a preprocessing step in `Permutation.__init__`: ```python # In new cycle_utils.py file: def normalize_disjoint_cycles(cycles): # Implement cycle normalization logic here # Return list of properly merged/normalized cycles # In permutation.py, modify Permutation.__init__ to call this utility ```",
+      "strategy": "`permutation_factory.py` - `create_permutation_from_cycles` factory function \u2014 Implement an entirely separate factory function that first analyzes the input cycles for overlaps, resolves them by composing the permutations they represent, then constructs and returns the appropriate permutation object rather than failing.",
       "branch_info": {
         "type": "strategy",
-        "strategy": "`cycle_utils.py` - New utility module with `normalize_disjoint_cycles` function \u2014 Create a separate module that handles cycle normalization and inject it as a preprocessing step in `Permutation.__init"
+        "strategy": "`permutation_factory.py` - `create_permutation_from_cycles` factory function \u2014 Implement an entirely separate factory function that first analyzes the input cycles for overlaps, resolves them by compo"
       }
     },
     {
-      "trajectory_id": "t0_strategy_4_sdlg_1",
-      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..72b503c358 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -895,7 +895,7 @@ def __new__(cls, *args, **kwargs):\n         # counting starts from 1.\n \n         temp = flatten(args)\n-        if has_dups(temp):\n+        if has_dups(temp) and not is_cycle:\n             if is_cycle:\n                 raise ValueError('there were repeated elements; to resolve '\n                 'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n",
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py\nindex 136ed5a478..f779b98876 100644\n--- a/sympy/combinatorics/permutations.py\n+++ b/sympy/combinatorics/permutations.py\n@@ -894,14 +894,31 @@ def __new__(cls, *args, **kwargs):\n         # for convenience in case one wants to enter permutations where\n         # counting starts from 1.\n \n-        temp = flatten(args)\n-        if has_dups(temp):\n-            if is_cycle:\n-                raise ValueError('there were repeated elements; to resolve '\n-                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))\n-            else:\n-                raise ValueError('there were repeated elements.')\n         temp = set(temp)\n+        # Handle overlapping cycles by composing them properly\n+        if is_cycle and has_dups(temp):\n+            # For overlapping cycles, compute their composition from left to right\n+            # Create identity permutation\n+            max_elem = max(temp) if temp else 0\n+            aform = list(range(max_elem + 1))\n+            # Apply cycles from left to right (composition order)\n+            for c in args:\n+                if c:  # Non-empty cycle\n+                    # Apply cycle c to current permutation\n+                    cycle_map = {}\n+                    for i in range(len(c)):\n+                        cycle_map[c[i]] = c[(i+1) % len(c)]\n+                    # Update permutation\n+                    new_aform = aform[:]\n+                    for i in range(len(aform)):\n+                        if i in cycle_map:\n+                            new_aform[i] = cycle_map[i]\n+                    aform = new_aform\n+            # Adjust size if needed\n+            if size and size > len(aform):\n+                aform.extend(list(range(len(aform), size)))\n+            return cls._af_new(aform)\n+\n \n         if not is_cycle and \\\n                 any(i not in temp for i in range(len(temp))):\n",
       "submitted": true,
-      "steps": 34,
-      "parent_id": "t0_strategy_4",
-      "strategy": "`permutation.py` - `Permutation._process_cycles` internal method \u2014 Modify the core processing logic to implement lazy evaluation and dynamic resolution rather than upfront strict validation: ```python # In Permutation._process_cycles, replace cycle application logic: def _process_cycles(self, cycles): # Instead of validating, apply cycles sequentially # Track which elements are already mapped to resolve conflicts result = {} for i, cycle in enumerate(reversed(cycles)): # Right-to-left order self",
+      "steps": 144,
+      "parent_id": "t0",
+      "strategy": "`permutation.py` - `Permutation._apply_cycle` internal method \u2014 Change the core cycle application logic to handle overlapping cycles by first computing the composition of all given cycles in left-to-right order and then constructing the final permutation representation, making the constructor work with the computed result instead of rejecting the input.",
       "branch_info": {
-        "type": "sdlg",
-        "rank": 1
+        "type": "strategy",
+        "strategy": "`permutation.py` - `Permutation._apply_cycle` internal method \u2014 Change the core cycle application logic to handle overlapping cycles by first computing the composition of all given cycles in left-to-r"
       }
     }
   ],
-  "branching_events": 2,
-  "strategies_proposed": 7
+  "branching_events": 1,
+  "strategies_proposed": 6
 }
