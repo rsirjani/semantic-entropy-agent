@@ -213,16 +213,21 @@ class SDLGGenerator:
         if not ranked:
             return alternatives
 
-        used_positions = set()
+        used_substitutions = set()  # (position, substitute_id) pairs
         for n in range(n_alts):
-            # Find next unused position
+            # Find next unused (position, substitute) pair — allow multiple
+            # substitutions at the same position since different replacements
+            # at a high-attribution position produce genuinely different completions
             attempt = n
-            while attempt < len(ranked) and ranked[attempt].position in used_positions:
+            while attempt < len(ranked):
+                key = (ranked[attempt].position, ranked[attempt].substitute_id)
+                if key not in used_substitutions:
+                    break
                 attempt += 1
             if attempt >= len(ranked):
                 break
             sub = ranked[attempt]
-            used_positions.add(sub.position)
+            used_substitutions.add((sub.position, sub.substitute_id))
 
             try:
                 if target == "thought":

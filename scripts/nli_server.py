@@ -165,12 +165,15 @@ def sdlg_rank(req: SDLGRankRequest):
     # Sort by attribution + substitution combined
     candidates.sort(key=lambda c: c["attribution"] + c["substitution"], reverse=True)
 
-    # Deduplicate: best replacement per position
+    # Keep multiple replacements per position — different substitutions at the
+    # same high-attribution position produce genuinely different completions.
+    # Deduplicate only exact (position, replacement) pairs.
     seen = set()
     deduped = []
     for c in candidates:
-        if c["position"] not in seen:
-            seen.add(c["position"])
+        key = (c["position"], c["replacement_id"])
+        if key not in seen:
+            seen.add(key)
             deduped.append(c)
 
     return {"candidates": deduped[:50]}
