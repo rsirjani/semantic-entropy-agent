@@ -1,54 +1,66 @@
 {
   "instance_id": "sympy__sympy-16766",
-  "elapsed_seconds": 872.0810928344727,
-  "total_steps": 165,
+  "elapsed_seconds": 500.6240108013153,
+  "total_steps": 222,
   "total_trajectories": 5,
   "completed_trajectories": 5,
   "submitted_trajectories": 5,
   "patches": [
     {
       "trajectory_id": "t0",
-      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..37026c67e 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -388,11 +388,13 @@ def pycode(expr, **settings):\n     \"\"\"\n     return PythonCodePrinter(settings).doprint(expr)\n \n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n \n _not_in_mpmath = 'log1p log2'.split()\n _in_mpmath = [(k, v) for k, v in _known_functions_math.items() if k not in _not_in_mpmath]\n _known_functions_mpmath = dict(_in_mpmath, **{\n-    'sign': 'sign',\n })\n _known_constants_mpmath = {\n     'Pi': 'pi'\n",
+      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..0570da2ea 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -358,6 +358,9 @@ def _print_Not(self, expr):\n         return self._operators['not'] + self.parenthesize(expr.args[0], PREC)\n \n \n+    def _print_Indexed(self, expr):\n+        base, *indices = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in indices]))\n for k in PythonCodePrinter._kf:\n     setattr(PythonCodePrinter, '_print_%s' % k, _print_known_func)\n \n",
       "submitted": true,
-      "steps": 42,
+      "steps": 37,
       "parent_id": null,
-      "strategy": "`/testbed/sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class \u2014 Add the complete `_print_Indexed` method implementation within the `PythonCodePrinter` class, placing it after the existing `_print_MatrixElement` method and before the closing of the class definition: ```python def _print_MatrixElement(self, expr): return \"%s[%s]\" % (self._print(expr.parent), \",\".join(map(self._print, expr.args[1:]))) def _print_Indexed(self, expr): base, *index = expr.args return \"",
+      "strategy": "`sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class \u2014 Add a new method `_print_Indexed` to the `PythonCodePrinter` class that handles `Indexed` objects by extracting the base and indices, then formatting them as valid Python list/array access syntax using string formatting.",
       "branch_info": {}
     },
     {
       "trajectory_id": "t0_strategy_1",
-      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..3c1da6577 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -348,6 +348,9 @@ def _print_NoneToken(self, arg):\n \n \n class PythonCodePrinter(AbstractPythonCodePrinter):\n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n \n     def _print_sign(self, e):\n         return '(0.0 if {e} == 0 else {f}(1, {e}))'.format(\n",
+      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..08d3ca52e 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -713,6 +713,10 @@ def _print_SparseMatrix(self, expr):\n             data.append(v)\n \n         return \"{name}({data}, ({i}, {j}), shape={shape})\".format(\n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n+\n             name=self._module_format('scipy.sparse.coo_matrix'),\n             data=data, i=i, j=j, shape=expr.shape\n         )\n",
       "submitted": true,
-      "steps": 15,
+      "steps": 24,
       "parent_id": "t0",
-      "strategy": "`/testbed/sympy/printing/pycode.py` - Modify `PythonCodePrinter.__init__` to register custom handler \u2014 Add a new registration mechanism in the constructor that dynamically adds the indexed handler using a callback system rather than direct method addition: ```python def __init__(self, settings=None): super(PythonCodePrinter, self).__init__(settings) self._kf = self._get_function # Register indexed handler self._print_functions['Indexed'] = self._print_Indexed ```",
+      "strategy": "`sympy/printing/codeprinter.py` - Modify `CodePrinter` base class to handle `Indexed` objects \u2014 Override the generic `doprint` method or add a specialized dispatch mechanism in the `CodePrinter` base class to detect `Indexed` objects and route them to a specific handler before falling back to the default behavior.",
       "branch_info": {
         "type": "strategy",
-        "strategy": "`/testbed/sympy/printing/pycode.py` - Modify `PythonCodePrinter.__init__` to register custom handler \u2014 Add a new registration mechanism in the constructor that dynamically adds the indexed handler usi"
+        "strategy": "`sympy/printing/codeprinter.py` - Modify `CodePrinter` base class to handle `Indexed` objects \u2014 Override the generic `doprint` method or add a specialized dispatch mechanism in the `CodePrinter` base "
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..f641b9b9d 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -357,6 +357,9 @@ def _print_Not(self, expr):\n         PREC = precedence(expr)\n         return self._operators['not'] + self.parenthesize(expr.args[0], PREC)\n \n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n \n for k in PythonCodePrinter._kf:\n     setattr(PythonCodePrinter, '_print_%s' % k, _print_known_func)\n",
+      "submitted": true,
+      "steps": 87,
+      "parent_id": "t0",
+      "strategy": "`sympy/core/containers.py` - Extend `Indexed` class with `__repr__` override \u2014 Modify the `Indexed` class definition in `sympy/core/containers.py` to include a custom `__repr__` or `__str__` method that provides appropriate Python representation that can be used directly by printers without special handling.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/core/containers.py` - Extend `Indexed` class with `__repr__` override \u2014 Modify the `Indexed` class definition in `sympy/core/containers.py` to include a custom `__repr__` or `__str__` method th"
       }
     },
     {
       "trajectory_id": "t0_strategy_3",
-      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..f4bfb8ce9 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -358,6 +358,9 @@ def _print_Not(self, expr):\n         return self._operators['not'] + self.parenthesize(expr.args[0], PREC)\n \n \n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n for k in PythonCodePrinter._kf:\n     setattr(PythonCodePrinter, '_print_%s' % k, _print_known_func)\n \n",
+      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..ec376d1bc 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -353,6 +353,9 @@ def _print_sign(self, e):\n         return '(0.0 if {e} == 0 else {f}(1, {e}))'.format(\n             f=self._module_format('math.copysign'), e=self._print(e.args[0]))\n \n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n     def _print_Not(self, expr):\n         PREC = precedence(expr)\n         return self._operators['not'] + self.parenthesize(expr.args[0], PREC)\n",
       "submitted": true,
-      "steps": 37,
+      "steps": 28,
       "parent_id": "t0",
-      "strategy": "`/testbed/sympy/core/expr.py` - Modify `Indexed` class to include Python code generation \u2014 Add a `pythoncode` method directly to the `Indexed` class in the core module to provide its own code generation: ```python class Indexed(Basic): # ... existing code ... def pythoncode(self): # Generate python code representation base, *index = self.args return \"{}[{}]\".format(str(base), \", \".join([str(ind) for ind in index])) ```",
+      "strategy": "`sympy/printing/pycode.py` - Register `Indexed` in `_print_dict` \u2014 Add an entry for `Indexed` type in the `_print_dict` mapping within `PythonCodePrinter` that maps the `Indexed` type to the appropriate Python code generation function instead of letting it fall through to the default error case.",
       "branch_info": {
         "type": "strategy",
-        "strategy": "`/testbed/sympy/core/expr.py` - Modify `Indexed` class to include Python code generation \u2014 Add a `pythoncode` method directly to the `Indexed` class in the core module to provide its own code generati"
+        "strategy": "`sympy/printing/pycode.py` - Register `Indexed` in `_print_dict` \u2014 Add an entry for `Indexed` type in the `_print_dict` mapping within `PythonCodePrinter` that maps the `Indexed` type to the appropria"
       }
     },
     {
       "trajectory_id": "t0_strategy_4",
-      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..3c1da6577 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -348,6 +348,9 @@ def _print_NoneToken(self, arg):\n \n \n class PythonCodePrinter(AbstractPythonCodePrinter):\n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n \n     def _print_sign(self, e):\n         return '(0.0 if {e} == 0 else {f}(1, {e}))'.format(\n",
+      "patch": "diff --git a/sympy/printing/pycode.py b/sympy/printing/pycode.py\nindex a3f031073..b6d5b9494 100644\n--- a/sympy/printing/pycode.py\n+++ b/sympy/printing/pycode.py\n@@ -10,6 +10,7 @@\n from sympy.core import S\n from .precedence import precedence\n from .codeprinter import CodePrinter\n+from sympy.tensor.indexed import Indexed\n \n _kw_py2and3 = {\n     'and', 'as', 'assert', 'break', 'class', 'continue', 'def', 'del', 'elif',\n@@ -357,6 +358,9 @@ def _print_Not(self, expr):\n         PREC = precedence(expr)\n         return self._operators['not'] + self.parenthesize(expr.args[0], PREC)\n \n+    def _print_Indexed(self, expr):\n+        base, *index = expr.args\n+        return \"{}[{}]\".format(str(base), \", \".join([self._print(ind) for ind in index]))\n \n for k in PythonCodePrinter._kf:\n     setattr(PythonCodePrinter, '_print_%s' % k, _print_known_func)\n",
       "submitted": true,
-      "steps": 22,
+      "steps": 46,
       "parent_id": "t0",
-      "strategy": "`/testbed/sympy/printing/pycode.py` - Create separate plugin architecture for code printers \u2014 Implement a plugin registration system where indexed handling can be loaded as a separate module: ```python # At top of file from sympy.printing.pycode_plugins import indexed_plugin class PythonCodePrinter(CodePrinter): printmethod = \"_pythoncode\" language = \"Python\" def __init__(self, settings=None): super(PythonCodePrinter, self).__init__(settings) self._kf = self._get_function # Load plugins self._lo",
+      "strategy": "`sympy/printing/__init__.py` - Modify printer registration mechanism \u2014 Change the printer registration logic in `sympy/printing/__init__.py` to automatically detect and register handlers for container types like `Indexed` during printer initialization rather than relying on explicit method definitions.",
       "branch_info": {
         "type": "strategy",
-        "strategy": "`/testbed/sympy/printing/pycode.py` - Create separate plugin architecture for code printers \u2014 Implement a plugin registration system where indexed handling can be loaded as a separate module: ```pytho"
+        "strategy": "`sympy/printing/__init__.py` - Modify printer registration mechanism \u2014 Change the printer registration logic in `sympy/printing/__init__.py` to automatically detect and register handlers for container"
       }
     }
   ],

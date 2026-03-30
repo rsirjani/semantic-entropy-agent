@@ -1,50 +1,13 @@
 diff --git a/sympy/printing/mathematica.py b/sympy/printing/mathematica.py
-index ea7e3a2d9..406d468b7 100644
+index ea7e3a2d9..e6c90c0ac 100644
 --- a/sympy/printing/mathematica.py
 +++ b/sympy/printing/mathematica.py
-@@ -94,12 +94,27 @@ def _print_list(self, expr):
-     _print_Tuple = _print_list
- 
-     def _print_Function(self, expr):
-+        # Handle special cases for Max and Min functions
-+        if expr.func.__name__ == "Max":
-+            return "Max[" + self.stringify(expr.args, ", ") + "]"
-+        elif expr.func.__name__ == "Min":
-+            return "Min[" + self.stringify(expr.args, ", ") + "]"
-+        
-+        # Use the standard dispatch mechanism for other functions
-         if expr.func.__name__ in self.known_functions:
-             cond_mfunc = self.known_functions[expr.func.__name__]
-             for cond, mfunc in cond_mfunc:
-                 if cond(*expr.args):
-                     return "%s[%s]" % (mfunc, self.stringify(expr.args, ", "))
--        return expr.func.__name__ + "[%s]" % self.stringify(expr.args, ", ")
-+        
-+        # Default case - try to match known functions or fallback to name
-+        func_name = expr.func.__name__
-+        if func_name in self.known_functions:
-+            # This shouldn't happen due to earlier check, but just in case
-+            return "%s[%s]" % (func_name, self.stringify(expr.args, ", "))
-+        
-+        # For unknown functions, use the standard approach
-+        return func_name + "[" + self.stringify(expr.args, ", ") + "]"
- 
-     def _print_Integral(self, expr):
-         if len(expr.variables) == 1 and not expr.limits[0][1:]:
-@@ -111,11 +126,12 @@ def _print_Integral(self, expr):
-     def _print_Sum(self, expr):
-         return "Hold[Sum[" + ', '.join(self.doprint(a) for a in expr.args) + "]]"
- 
--    def _print_Derivative(self, expr):
--        dexpr = expr.expr
--        dvars = [i[0] if i[1] == 1 else i for i in expr.variable_count]
--        return "Hold[D[" + ', '.join(self.doprint(a) for a in [dexpr] + dvars) + "]]"
- 
-+    def _print_Max(self, expr):
-+        return "Max[" + self.stringify(expr.args, ", ") + "]"
-+
-+    def _print_Min(self, expr):
-+        return "Min[" + self.stringify(expr.args, ", ") + "]"
- 
- def mathematica_code(expr, **settings):
-     r"""Converts an expr to a string of the Wolfram Mathematica code
+@@ -57,6 +57,8 @@ def __init__(self, settings={}):
+         """Register function mappings supplied by user"""
+         CodePrinter.__init__(self, settings)
+         self.known_functions = dict(known_functions)
++        # Add Max function to known functions
++        self.known_functions["Max"] = [(lambda *x: True, "Max")]
+         userfuncs = settings.get('user_functions', {})
+         for k, v in userfuncs.items():
+             if not isinstance(v, list):

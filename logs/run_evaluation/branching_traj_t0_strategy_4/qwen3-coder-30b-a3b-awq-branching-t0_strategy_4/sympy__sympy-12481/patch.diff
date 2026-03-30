@@ -1,43 +1,35 @@
 diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
-index 136ed5a478..f779b98876 100644
+index 136ed5a478..8f9c35e9e2 100644
 --- a/sympy/combinatorics/permutations.py
 +++ b/sympy/combinatorics/permutations.py
-@@ -894,14 +894,31 @@ def __new__(cls, *args, **kwargs):
-         # for convenience in case one wants to enter permutations where
-         # counting starts from 1.
+@@ -896,11 +896,28 @@ def __new__(cls, *args, **kwargs):
  
--        temp = flatten(args)
--        if has_dups(temp):
--            if is_cycle:
+         temp = flatten(args)
+         if has_dups(temp):
++            # Handle non-disjoint cycles by applying them left-to-right
+             if is_cycle:
 -                raise ValueError('there were repeated elements; to resolve '
 -                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
--            else:
--                raise ValueError('there were repeated elements.')
++                # For non-disjoint cycles, apply them in left-to-right order
++                # First determine the maximum element to size our permutation
++                max_elem = max(temp) if temp else 0
++                # Initialize identity permutation
++                result = list(range(max_elem + 1))
++                
++                # Apply cycles from left to right
++                for cycle in args:
++                    # For each cycle, apply the mapping
++                    for i in range(len(cycle)):
++                        # Map element to its successor in the cycle
++                        result[cycle[i]] = cycle[(i+1) % len(cycle)]
++                
++                # Return the constructed permutation
++                return cls._af_new(result)
+             else:
+                 raise ValueError('there were repeated elements.')
++            if is_cycle:
++                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
++            else:
          temp = set(temp)
-+        # Handle overlapping cycles by composing them properly
-+        if is_cycle and has_dups(temp):
-+            # For overlapping cycles, compute their composition from left to right
-+            # Create identity permutation
-+            max_elem = max(temp) if temp else 0
-+            aform = list(range(max_elem + 1))
-+            # Apply cycles from left to right (composition order)
-+            for c in args:
-+                if c:  # Non-empty cycle
-+                    # Apply cycle c to current permutation
-+                    cycle_map = {}
-+                    for i in range(len(c)):
-+                        cycle_map[c[i]] = c[(i+1) % len(c)]
-+                    # Update permutation
-+                    new_aform = aform[:]
-+                    for i in range(len(aform)):
-+                        if i in cycle_map:
-+                            new_aform[i] = cycle_map[i]
-+                    aform = new_aform
-+            # Adjust size if needed
-+            if size and size > len(aform):
-+                aform.extend(list(range(len(aform), size)))
-+            return cls._af_new(aform)
-+
  
          if not is_cycle and \
-                 any(i not in temp for i in range(len(temp))):

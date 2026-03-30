@@ -1,11 +1,60 @@
 {
   "instance_id": "sympy__sympy-12096",
-  "elapsed_seconds": 113.06908941268921,
-  "total_steps": 251,
-  "total_trajectories": 1,
-  "completed_trajectories": 1,
-  "submitted_trajectories": 0,
-  "patches": [],
+  "elapsed_seconds": 594.4366369247437,
+  "total_steps": 247,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/utilities/lambdify.py b/sympy/utilities/lambdify.py\nindex f5bf0ca39..8fb18fd54 100644\n--- a/sympy/utilities/lambdify.py\n+++ b/sympy/utilities/lambdify.py\n@@ -695,5 +695,6 @@ def implemented_function(symfunc, implementation):\n         raise ValueError('symfunc should be either a string or'\n                          ' an UndefinedFunction instance.')\n     # We need to attach as a method because symfunc will be a class\n-    symfunc._imp_ = staticmethod(implementation)\n+    symfunc._imp_ = implementation\n+    symfunc._is_implemented_function = True\n     return symfunc\n",
+      "submitted": true,
+      "steps": 28,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/utilities/lambdify.py` - Enhance the `implemented_function` function to store additional metadata that tracks when evaluation should be handled specially: ```python def implemented_function(symfunc, implementation): # ... existing code ... symfunc._imp_ = implementation symfunc._is_implemented_function = True return symfunc ``` This differs by adding metadata rather than modifying the evaluation logic, allowing downstream code to detect and handle these special functions differen",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/utilities/lambdify.py` - Enhance the `implemented_function` function to store additional metadata that tracks when evaluation should be handled specially: ```python def implemented_fun"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "=== FINAL PATCH CONTENT ===\nThe fix modifies the _eval_evalf method in sympy/core/function.py to properly handle recursive evaluation of arguments that have _imp_ implementations.\nBefore: return Float(self._imp_(*self.args), prec)\nAfter:  Handle recursive evaluation for arguments with _imp_ by evaluating them first with evalf(prec) when they have _imp_ methods.\n",
+      "submitted": true,
+      "steps": 46,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/function.py` - Create a new method that specifically handles composed function evaluation that bypasses the standard evaluation chain: ```python def _eval_composed_evalf(self, prec): if hasattr(self, '_imp_') and len(self.args) == 1: arg_result = self.args[0].evalf(prec) return self._imp_(arg_result) return None def _eval_evalf(self, prec): # Modified to check for composed functions if hasattr(self, '_imp_') and hasattr(self, '_is_implemented_function'): # Handle the case wh",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/function.py` - Create a new method that specifically handles composed function evaluation that bypasses the standard evaluation chain: ```python def _eval_composed_evalf(self, pre"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d..ce42cb542 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -507,7 +507,7 @@ def _eval_evalf(self, prec):\n             func = getattr(mpmath, fname)\n         except (AttributeError, KeyError):\n             try:\n-                return Float(self._imp_(*self.args), prec)\n+                return Float(self._imp_(*self.args), prec).evalf(prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n \n",
+      "submitted": true,
+      "steps": 59,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/basic.py` - Modify the base `evalf` method to recognize and handle implemented functions specifically in the evaluation chain: ```python def evalf(self, prec=None, **options): # Add special handling for implemented functions if hasattr(self, '_imp_') and not hasattr(self, 'args'): # This is likely an implemented function instance if hasattr(self, '_imp_'): return self._imp_(self.args[0]).evalf(prec) return self._eval_evalf(prec) if prec is not None else self._eval_evalf() ``",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/basic.py` - Modify the base `evalf` method to recognize and handle implemented functions specifically in the evaluation chain: ```python def evalf(self, prec=None, **options): # A"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -500,15 +500,20 @@ def _eval_evalf(self, prec):\n         except (AttributeError, KeyError):\n             try:\n                 # Fix: Ensure arguments are properly evaluated before applying _imp_\n                 # This resolves the issue where f(g(2)).evalf() would return f(g(2))\n                 # instead of the expected numeric result\n                 evaluated_args = []\n                 for arg in self.args:\n                     if hasattr(arg, 'evalf') and arg is not None:\n                         try:\n                             evaluated_args.append(arg.evalf(prec))\n                         except:\n                             evaluated_args.append(arg)\n                     else:\n                         evaluated_args.append(arg)\n                 return Float(self._imp_(*evaluated_args), prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n",
+      "submitted": true,
+      "steps": 42,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/function.py` - Introduce a new wrapper class that inherits from Function and implements proper composition handling: ```python class ImplementedFunction(Function): def __new__(cls, name, implementation): obj = super().__new__(cls, name) obj._imp_ = implementation return obj def _eval_evalf(self, prec): if hasattr(self, '_imp_') and len(self.args) > 0: # Ensure proper evaluation of arguments first args_evaluated = [arg.evalf(prec) for arg in self.args] result = self._imp_(*ar",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/function.py` - Introduce a new wrapper class that inherits from Function and implements proper composition handling: ```python class ImplementedFunction(Function): def __new__(cls"
+      }
+    }
+  ],
   "branching_events": 0,
-  "strategies_proposed": 1
+  "strategies_proposed": 5
 }

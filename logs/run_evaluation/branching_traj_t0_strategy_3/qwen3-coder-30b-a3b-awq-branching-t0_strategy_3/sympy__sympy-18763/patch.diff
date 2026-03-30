@@ -1,29 +1,33 @@
 diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
-index 8743723ea0..8133e1be50 100644
+index 8743723ea0..d3ee4b999f 100644
 --- a/sympy/printing/latex.py
 +++ b/sympy/printing/latex.py
-@@ -697,13 +697,19 @@ def _print_Derivative(self, expr):
+@@ -696,19 +696,23 @@ def _print_Derivative(self, expr):
+                                                   PRECEDENCE["Mul"],
                                                    strict=True))
  
++
      def _print_Subs(self, subs):
--        expr, old, new = subs.args
--        latex_expr = self._print(expr)
-+        # Check if the expression is an Add or Mul and needs parentheses
-+        from sympy.core.add import Add
-+        from sympy.core.mul import Mul
-+        if isinstance(expr, (Add, Mul)):
-+            latex_expr = self.parenthesize(expr, PRECEDENCE["Add"])
-+        else:
-+            latex_expr = self._print(expr)
+         expr, old, new = subs.args
+         latex_expr = self._print(expr)
++        # For complex expressions, wrap in parentheses to ensure proper grouping
++        if hasattr(expr, "is_Add") and len(expr.args) > 1:
++            latex_expr = r"\left( %s \right)" % latex_expr
++        elif hasattr(expr, "is_Mul") and len(expr.args) > 1:
++            latex_expr = r"\left( %s \right)" % latex_expr
          latex_old = (self._print(e) for e in old)
          latex_new = (self._print(e) for e in new)
 -        latex_subs = r'\\ '.join(
 -            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
 -        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr,
-+        latex_subs = r"\\\\ ".join(
++        latex_subs = r"\\ ".join(
 +            e[0] + "=" + e[1] for e in zip(latex_old, latex_new))
-+        return r"\\left. %s \\right|_{\\substack{ %s }}" % (latex_expr,
-+                                                         latex_subs)
++        return r"\left. %s \right|_{\substack{ %s }}" % (latex_expr,
                                                           latex_subs)
  
      def _print_Integral(self, expr):
+-        tex, symbols = "", []
+-
+         # Only up to \iiiint exists
+         if len(expr.limits) <= 4 and all(len(lim) == 1 for lim in expr.limits):
+             # Use len(expr.limits)-1 so that syntax highlighters don't think

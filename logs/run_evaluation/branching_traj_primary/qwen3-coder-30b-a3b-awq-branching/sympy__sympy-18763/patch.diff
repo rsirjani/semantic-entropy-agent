@@ -1,35 +1,20 @@
 diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
-index 8743723ea0..5800f24b54 100644
+index 8743723ea0..e12a0e8467 100644
 --- a/sympy/printing/latex.py
 +++ b/sympy/printing/latex.py
-@@ -2450,6 +2450,30 @@ def _print_udivisor_sigma(self, expr, exp=None):
-             tex = r"\left(%s\right)" % self._print(expr.args[0])
-         if exp is not None:
-             return r"\sigma^*^{%s}%s" % (self._print(exp), tex)
-+    def _print_Subs(self, expr):
-+        # Get the expression being substituted
-+        expr_to_print = expr.expr
-+        # For expressions that could benefit from parentheses in LaTeX,
-+        # wrap them appropriately
-+        if hasattr(expr_to_print, "is_Add") and expr_to_print.is_Add:
-+            # Add expressions should be parenthesized
-+            return r"\left. \left(%s\right) \right|_{\substack{ %s }}" % (
-+                self._print(expr_to_print),
-+                ", ".join("%s=%s" % (self._print(var), self._print(val))
-+                          for var, val in zip(expr.variables, expr.point)))
-+        elif hasattr(expr_to_print, "is_Mul") and expr_to_print.is_Mul:
-+            # Mul expressions should be parenthesized
-+            return r"\left. \left(%s\right) \right|_{\substack{ %s }}" % (
-+                self._print(expr_to_print),
-+                ", ".join("%s=%s" % (self._print(var), self._print(val))
-+                          for var, val in zip(expr.variables, expr.point)))
-+        else:
-+            # Default case - no extra parentheses needed
-+            return r"\left. %s \right|_{\substack{ %s }}" % (
-+                self._print(expr_to_print),
-+                ", ".join("%s=%s" % (self._print(var), self._print(val))
-+                          for var, val in zip(expr.variables, expr.point)))
-+
-         return r"\sigma^*%s" % tex
+@@ -703,10 +703,11 @@ def _print_Subs(self, subs):
+         latex_new = (self._print(e) for e in new)
+         latex_subs = r'\\ '.join(
+             e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
+-        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr,
+-                                                         latex_subs)
+-
+-    def _print_Integral(self, expr):
++        # Check if we need parentheses around the expression
++        from sympy.printing.precedence import precedence, PRECEDENCE
++        if precedence(expr) < PRECEDENCE["Add"] and not isinstance(expr, (tuple, list)):
++            latex_expr = self.parenthesize(latex_expr, PRECEDENCE["Add"])
++        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr, latex_subs)
+         tex, symbols = "", []
  
-     def _print_primenu(self, expr, exp=None):
+         # Only up to \iiiint exists

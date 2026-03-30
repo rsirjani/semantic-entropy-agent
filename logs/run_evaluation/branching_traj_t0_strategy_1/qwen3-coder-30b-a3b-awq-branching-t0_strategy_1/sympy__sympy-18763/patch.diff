@@ -1,41 +1,38 @@
 diff --git a/sympy/core/function.py b/sympy/core/function.py
-index 47e3a56ae8..57e3a56ae8 100644
+index 47e3a56ae8..ac613442f6 100644
 --- a/sympy/core/function.py
 +++ b/sympy/core/function.py
-@@ -2308,6 +2308,25 @@ class Subs(Expr):
+@@ -2307,6 +2307,33 @@ def __ne__(self, other):
          return not(self == other)
-
+ 
      def __hash__(self):
-+        # Add custom _latex method to handle proper parentheses for complex expressions
-+        def _latex(self, printer=None):
-+            # Handle LaTeX printing with proper parentheses
-+            from sympy.printing.latex import LatexPrinter
-+            
-+            # Get the LaTeX of the expression part
-+            if hasattr(self.expr, "_latex"):
-+                expr_latex = self.expr._latex(printer)
-+            else:
-+                expr_latex = str(self.expr)
-+            
-+            # Check if we need to add parentheses for complex expressions
-+            needs_parens = False
-+            if hasattr(self.expr, "__class__"):
-+                expr_class = self.expr.__class__.__name__
-+                needs_parens = expr_class in ("Add", "Mul", "Pow")
-+            
-+            # Wrap in parentheses if needed
-+            if needs_parens:
-+                expr_latex = "(" + expr_latex + ")"
-+            
-+            # Build the complete LaTeX with substitution markers
-+            try:
-+                # Format the substitution part properly
-+                var_list = [str(v) for v in self.variables]
-+                point_list = [str(p) for p in self.point]
-+                subs_part = ", ".join(f\"{v}={p}\" for v, p in zip(var_list, point_list))
-+                return f\"\\\\left. {expr_latex} \\\\right|_{{\\\\substack{{ {subs_part} }}}}\"
-+            except:
-+                # Fallback
-+                return f\"\\\\left. {expr_latex} \\\\right|_{{\\\\substack{{}}}}\"
-+
++    def _latex(self, printer=None):
++        from sympy.printing.latex import LatexPrinter
++        if printer is None:
++            printer = LatexPrinter()
++        
++        # Get the expression part
++        expr_str = printer._print(self.expr)
++        
++        # Check if we need parentheses around the expression
++        # For complex expressions like sums, we should add parentheses
++        needs_parens = False
++        if hasattr(self.expr, "is_Add") and self.expr.is_Add:
++            needs_parens = True
++        elif hasattr(self.expr, "is_Mul") and self.expr.is_Mul:
++            # For multiplication, check if it's a complex expression
++            if len(str(self.expr).split()) > 1:
++                needs_parens = True
++        
++        # If the expression needs parentheses, wrap them
++        if needs_parens:
++            expr_str = "\left(" + expr_str + "\right)"
++        
++        # Build the final LaTeX string
++        vars_str = ", ".join([printer._print(var) + "=" + printer._print(point) 
++                             for var, point in zip(self.variables, self.point)])
++        
++        return "\left. " + expr_str + " \right|_{\substack{ " + vars_str + " }} "
          return super(Subs, self).__hash__()
+ 
+     def _hashable_content(self):

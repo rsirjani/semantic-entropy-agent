@@ -1,30 +1,53 @@
-diff --git a/sympy/sets/conditionset.py b/sympy/sets/conditionset.py
-index 118eda6f77..e21c55911c 100644
---- a/sympy/sets/conditionset.py
-+++ b/sympy/sets/conditionset.py
-@@ -205,6 +205,7 @@ def as_relational(self, other):
-         return And(Lambda(self.sym, self.condition)(
-             other), self.base_set.contains(other))
+diff --git a/sympy/sets/fancysets.py b/sympy/sets/fancysets.py
+index bf013522e1..06183a8a12 100644
+--- a/sympy/sets/fancysets.py
++++ b/sympy/sets/fancysets.py
+@@ -355,7 +355,7 @@ def __new__(cls, flambda, *sets):
  
-+
-     def _eval_subs(self, old, new):
-         if not isinstance(self.sym, Expr):
-             # Don't do anything with the equation set syntax;
-@@ -240,11 +241,15 @@ def _eval_subs(self, old, new):
-             # the base set should be filtered and if new is not in
-             # the base set then this substitution is ignored
-             return self.func(sym, cond, base)
-+        # Handle the case where condition evaluates to True
-+        # but we should not change the bound variable
-         cond = self.condition.subs(old, new)
-         base = self.base_set.subs(old, new)
-         if cond is S.true:
--            return ConditionSet(new, Contains(new, base), base)
--        return self.func(self.sym, cond, base)
-+            # When condition is always true, return the base set
-+            # or properly handle the structure without changing bound variable
-+            return self.func(sym, S.true, base)
-+        return self.func(sym, cond, base)
+         return Basic.__new__(cls, flambda, *sets)
  
-     def dummy_eq(self, other, symbol=None):
-         if not isinstance(other, self.func):
+-    lamda = property(lambda self: self.args[0])
++    lambda_ = property(lambda self: self.args[0])
+     base_sets = property(lambda self: self.args[1:])
+ 
+     @property
+@@ -394,7 +394,7 @@ def _check_sig(cls, sig_i, set_i):
+     def __iter__(self):
+         already_seen = set()
+         for i in self.base_pset:
+-            val = self.lamda(*i)
++            val = self.lambda_(*i)
+             if val in already_seen:
+                 continue
+             else:
+@@ -402,7 +402,7 @@ def __iter__(self):
+                 yield val
+ 
+     def _is_multivariate(self):
+-        return len(self.lamda.variables) > 1
++        return len(self.lambda_.variables) > 1
+ 
+     def _contains(self, other):
+         from sympy.solvers.solveset import _solveset_multi
+@@ -441,9 +441,9 @@ def get_equations(expr, candidate):
+ 
+         # Get the basic objects together:
+         other = _sympify(other)
+-        expr = self.lamda.expr
+-        sig = self.lamda.signature
+-        variables = self.lamda.variables
++        expr = self.lambda_.expr
++        sig = self.lambda_.signature
++        variables = self.lambda_.variables
+         base_sets = self.base_sets
+ 
+         # Use dummy symbols for ImageSet parameters so they don't match
+@@ -485,7 +485,7 @@ def is_iterable(self):
+ 
+     def doit(self, **kwargs):
+         from sympy.sets.setexpr import SetExpr
+-        f = self.lamda
++        f = self.lambda_
+         sig = f.signature
+         if len(sig) == 1 and sig[0].is_symbol and isinstance(f.expr, Expr):
+             base_set = self.base_sets[0]
