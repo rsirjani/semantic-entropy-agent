@@ -97,15 +97,19 @@ def eval_single_trajectory(
         )
 
         # Check the report for pass/fail
+        # Reports are at: logs/run_evaluation/{run_id}/{model_name}/{instance_id}/report.json
         report_path = os.path.join(
             "logs", "run_evaluation", run_id,
-            f"{trajectory['model_name_or_path']}.{run_id}.json",
+            trajectory['model_name_or_path'],
+            instance_id,
+            "report.json",
         )
         resolved = False
         if os.path.exists(report_path):
             with open(report_path) as rf:
                 report = json.load(rf)
-            resolved = instance_id in report.get("resolved", [])
+            inst_report = report.get(instance_id, {})
+            resolved = inst_report.get("resolved", False)
 
         return {"trajectory_id": tid, "resolved": resolved, "patch_len": len(trajectory["model_patch"])}
 

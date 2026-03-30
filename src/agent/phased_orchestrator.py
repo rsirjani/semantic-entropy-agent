@@ -192,7 +192,20 @@ class PhasedOrchestrator:
                     self.trajectory_phases["t0"] = Phase.PATCH
                     break
 
-                # No hard step cap — search continues until relevance saturates
+                # Hard cap on search steps — prevents infinite loops when the
+                # agent repeatedly attempts blocked commands (which don't get
+                # relevance-scored and thus never trigger saturation)
+                if root.step >= self.max_search_steps:
+                    self.tracer.log(
+                        "phase1.search_step_limit",
+                        scores={"total_search_steps": root.step,
+                                "max_search_steps": self.max_search_steps},
+                        decision="TRANSITION_TO_PHASE2",
+                        phase="SEARCH", trajectory_id="t0", step=root.step,
+                    )
+                    logger.info(f"Search hit step limit ({self.max_search_steps}), transitioning to STRATEGY PROPOSAL")
+                    self.trajectory_phases["t0"] = Phase.PATCH
+                    break
 
             # === Phase 2: STRATEGY PROPOSAL (no containers created yet) ===
             # Build search report BEFORE pruning so relevant messages are visible.
@@ -405,6 +418,17 @@ class PhasedOrchestrator:
                 traj.agent.messages.pop()
             traj.agent.add_messages(error_msg)
             self._log_step(traj, phase="SEARCH", blocked=action_cmd[:100])
+
+            # Blocked commands count as low-relevance for saturation detection.
+            # Without this, the agent can loop forever attempting write commands
+            # that always get blocked, never triggering the saturation threshold.
+            self.consecutive_low_relevance += 1
+            self.search_relevance_scores.append({
+                "step": traj.step,
+                "relevance": 0.0,
+                "is_relevant": False,
+                "summary": f"[BLOCKED] {action_cmd[:80]}",
+            })
             return
 
         # --- Execute search command ---
