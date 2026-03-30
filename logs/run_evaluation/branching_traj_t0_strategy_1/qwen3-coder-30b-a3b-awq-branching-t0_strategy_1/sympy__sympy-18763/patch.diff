@@ -1,0 +1,41 @@
+diff --git a/sympy/core/function.py b/sympy/core/function.py
+index 47e3a56ae8..57e3a56ae8 100644
+--- a/sympy/core/function.py
++++ b/sympy/core/function.py
+@@ -2308,6 +2308,25 @@ class Subs(Expr):
+         return not(self == other)
+
+     def __hash__(self):
++        # Add custom _latex method to handle proper parentheses for complex expressions
++        def _latex(self, printer=None):
++            # Handle LaTeX printing with proper parentheses
++            from sympy.printing.latex import LatexPrinter
++            
++            # Get the LaTeX of the expression part
++            if hasattr(self.expr, "_latex"):
++                expr_latex = self.expr._latex(printer)
++            else:
++                expr_latex = str(self.expr)
++            
++            # Check if we need to add parentheses for complex expressions
++            needs_parens = False
++            if hasattr(self.expr, "__class__"):
++                expr_class = self.expr.__class__.__name__
++                needs_parens = expr_class in ("Add", "Mul", "Pow")
++            
++            # Wrap in parentheses if needed
++            if needs_parens:
++                expr_latex = "(" + expr_latex + ")"
++            
++            # Build the complete LaTeX with substitution markers
++            try:
++                # Format the substitution part properly
++                var_list = [str(v) for v in self.variables]
++                point_list = [str(p) for p in self.point]
++                subs_part = ", ".join(f\"{v}={p}\" for v, p in zip(var_list, point_list))
++                return f\"\\\\left. {expr_latex} \\\\right|_{{\\\\substack{{ {subs_part} }}}}\"
++            except:
++                # Fallback
++                return f\"\\\\left. {expr_latex} \\\\right|_{{\\\\substack{{}}}}\"
++
+         return super(Subs, self).__hash__()
