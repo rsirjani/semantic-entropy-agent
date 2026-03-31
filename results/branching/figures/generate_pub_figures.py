@@ -23,7 +23,17 @@ os.makedirs('results/branching/figures', exist_ok=True)
 instances_raw = load_swebench_instances(instance_ids=TARGET_INSTANCE_IDS)
 gold_patches = {inst['instance_id']: inst.get('patch', '') for inst in instances_raw}
 problem_stmts = {inst['instance_id']: inst.get('problem_statement', '') for inst in instances_raw}
-baseline_preds = json.load(open('results/baseline/preds.json'))
+# Load baseline predictions — support both old preds.json and new predictions.jsonl
+_baseline_preds_path = 'results/baseline/preds.json'
+if os.path.exists(_baseline_preds_path):
+    baseline_preds = json.load(open(_baseline_preds_path))
+else:
+    baseline_preds = {}
+    with open('results/baseline/predictions.jsonl') as _f:
+        for _line in _f:
+            if _line.strip():
+                _pred = json.loads(_line)
+                baseline_preds[_pred['instance_id']] = _pred
 summary = json.load(open('results/branching/full_summary.json'))
 
 with open('results/branching/branching_run.log', 'r', encoding='utf-8', errors='replace') as f:
@@ -32,9 +42,12 @@ with open('results/branching/branching_run.log', 'r', encoding='utf-8', errors='
 with open('results/branching/predictions_all_trajectories.jsonl') as f:
     all_traj_preds = [json.loads(l) for l in f if l.strip()]
 
-# Baseline eval
+# Baseline eval — prefer 250-step results, fall back to v3_fixed
 baseline_results = {}
-for f in glob.glob('logs/run_evaluation/baseline_v3_fixed/*/sympy__sympy-*/report.json'):
+_baseline_eval_pattern = 'logs/run_evaluation/baseline_250step/*/sympy__sympy-*/report.json'
+if not glob.glob(_baseline_eval_pattern):
+    _baseline_eval_pattern = 'logs/run_evaluation/baseline_v3_fixed/*/sympy__sympy-*/report.json'
+for f in glob.glob(_baseline_eval_pattern):
     r = json.load(open(f))
     for iid, data in r.items():
         baseline_results[iid] = data.get('resolved', False)
@@ -679,8 +692,17 @@ for num in ORDER:
 baseline_steps = {}
 for num in ORDER:
     iid = f'sympy__sympy-{num}'
-    traj = json.load(open(f'results/baseline/{iid}/{iid}.traj.json', encoding='utf-8', errors='replace'))
-    baseline_steps[num] = len([m for m in traj.get('messages', []) if m.get('role') == 'assistant'])
+    _traj_path = f'results/baseline/{iid}/{iid}.traj.json'
+    _trajl_path = f'results/baseline/{iid}/trajectory.jsonl'
+    if os.path.exists(_traj_path):
+        traj = json.load(open(_traj_path, encoding='utf-8', errors='replace'))
+        baseline_steps[num] = len([m for m in traj.get('messages', []) if m.get('role') == 'assistant'])
+    elif os.path.exists(_trajl_path):
+        with open(_trajl_path, encoding='utf-8', errors='replace') as _tf:
+            _entries = [json.loads(l) for l in _tf if l.strip()]
+        baseline_steps[num] = len([e for e in _entries if e.get('role') == 'assistant'])
+    else:
+        baseline_steps[num] = 0
 
 with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.5,
                       nrows=2, ncols=5, sharex=False, sharey=True) as (fig, axs):

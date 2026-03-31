@@ -38,11 +38,13 @@ class RelevanceScorer:
         threshold: float = 0.5,
         model_name: str = "openai/qwen3-coder",
         model_kwargs: dict | None = None,
+        use_nli: bool = False,
     ):
         self.nli = nli
         self.threshold = threshold
         self.model_name = model_name
         self.model_kwargs = model_kwargs or {}
+        self.use_nli = use_nli
 
     def _summarize_finding(self, thought: str, observation: str) -> str:
         """Use LLM to summarize what a search step found."""
@@ -66,14 +68,38 @@ class RelevanceScorer:
             return thought[:200]
 
     def score(self, finding_summary: str, problem_statement: str) -> float:
+        """Score relevance — dispatches to NLI or LLM based on use_nli flag."""
+        if self.use_nli:
+            return self._score_nli(finding_summary, problem_statement)
+        return self._score_llm(finding_summary, problem_statement)
+
+    def _score_nli(self, finding_summary: str, problem_statement: str) -> float:
+        """Score relevance using DeBERTa NLI entailment.
+
+        r(o_i) = P(entailment | premise=problem, hypothesis=summary)
+
+        Works because the summary is already natural language (from Step 1),
+        so the domain mismatch with DeBERTa is resolved.
+        """
+        try:
+            result = self.nli.classify(
+                premise=problem_statement[:500],
+                hypothesis=finding_summary[:200],
+            )
+            score = result["entailment"]
+            logger.debug(
+                f"NLI relevance: ent={score:.3f} "
+                f"neu={result['neutral']:.3f} con={result['contradiction']:.3f}"
+            )
+            return score
+        except Exception as e:
+            logger.debug(f"NLI relevance scoring failed: {e}, falling back to LLM")
+            return self._score_llm(finding_summary, problem_statement)
+
+    def _score_llm(self, finding_summary: str, problem_statement: str) -> float:
         """Score relevance using LLM judgment.
 
-        DeBERTa NLI doesn't work for code-finding-to-bug relevance because:
-        - NLI is trained on natural language sentence pairs, not code/bug pairs
-        - Without perfectly matched context, entailment is always near-zero
-        - With too much shared context, entailment is always near-one
-
-        Instead, use a cheap LLM call: ask the model to rate relevance 0-10,
+        Uses a cheap LLM call: ask the model to rate relevance 0-10,
         normalize to [0, 1]. This leverages the LLM's code understanding.
         """
         prompt = (
@@ -93,7 +119,6 @@ class RelevanceScorer:
                 **kwargs,
             )
             text = (response.choices[0].message.content or "").strip()
-            # Extract the first number from the response
             import re
             match = re.search(r"(\d+)", text)
             if match:

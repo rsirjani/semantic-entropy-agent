@@ -83,6 +83,7 @@ class PhasedOrchestrator:
             threshold=branching_config.get("relevance_threshold", 0.4),
             model_name=model_config.get("model_name", "openai/qwen3-coder"),
             model_kwargs=model_config.get("model_kwargs", {}),
+            use_nli=branching_config.get("relevance_use_nli", False),
         )
 
         # Strategy proposer
