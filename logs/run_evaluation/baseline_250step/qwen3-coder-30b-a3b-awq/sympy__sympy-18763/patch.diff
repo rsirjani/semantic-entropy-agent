@@ -1,0 +1,55 @@
+diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
+index 8743723ea0..90d9f086f7 100644
+--- a/sympy/printing/latex.py
++++ b/sympy/printing/latex.py
+@@ -692,25 +692,6 @@ def _print_Derivative(self, expr):
+         else:
+             tex = r"\frac{%s^{%s}}{%s}" % (diff_symbol, self._print(dim), tex)
+ 
+-        return r"%s %s" % (tex, self.parenthesize(expr.expr,
+-                                                  PRECEDENCE["Mul"],
+-                                                  strict=True))
+-
+-    def _print_Subs(self, subs):
+-        expr, old, new = subs.args
+-        latex_expr = self._print(expr)
+-        latex_old = (self._print(e) for e in old)
+-        latex_new = (self._print(e) for e in new)
+-        latex_subs = r'\\ '.join(
+-            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
+-        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr,
+-                                                         latex_subs)
+-
+-    def _print_Integral(self, expr):
+-        tex, symbols = "", []
+-
+-        # Only up to \iiiint exists
+-        if len(expr.limits) <= 4 and all(len(lim) == 1 for lim in expr.limits):
+             # Use len(expr.limits)-1 so that syntax highlighters don't think
+             # \" is an escaped quote
+             tex = r"\i" + "i"*(len(expr.limits) - 1) + "nt"
+@@ -2841,3 +2822,24 @@ def multiline_latex(lhs, rhs, terms_per_line=1, environment="align*", use_dots=F
+         term_count += 1
+     result += end_term
+     return result
++    def _print_Subs(self, subs):
++        expr, old, new = subs.args
++        latex_expr = self._print(expr)
++        latex_old = (self._print(e) for e in old)
++        latex_new = (self._print(e) for e in new)
++        latex_subs = r'\\ '.join(
++            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
++        
++        # Check if we need to wrap the expression in parentheses
++        # If the expression is a compound expression (Add, Mul, etc.), 
++        # wrap it in parentheses for clarity
++        from sympy.core.add import Add
++        from sympy.core.mul import Mul
++        from sympy.core.power import Pow
++        
++        # If the expression is a compound expression, wrap it in parentheses
++        if isinstance(expr, (Add, Mul, Pow)):
++            latex_expr = r'\left(%s\right)' % latex_expr
++            
++        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr,
++                                                         latex_subs)

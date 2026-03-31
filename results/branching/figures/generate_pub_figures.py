@@ -62,134 +62,204 @@ C_LIGHT = '#F3F4F6'
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# FIGURE 2: Branching Tree — clean horizontal layout
+# FIGURE 2: Branching Tree — two-column landscape layout
 # ════════════════════════════════════════════════════════════════════════════════
-with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.6) as (fig, ax):
-    ax.set_xlim(-2.2, 6.5)
-    ax.axis('off')
+with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.3,
+                      nrows=1, ncols=2) as (fig, axs):
 
-    ROW_H = 0.45       # height per trajectory row
-    INST_GAP = 0.25     # gap between instances
-    BAR_H = 0.32        # bar thickness
-    FORK_X = 0.0        # x where branches fork from
+    ROW_H = 0.3
+    INST_GAP = 0.12
+    BAR_H = 0.22
+    FORK_X = 0.0
 
-    y = 0
-    for i, num in enumerate(ORDER):
-        iid = f'sympy__sympy-{num}'
-        d = summary['instances'].get(iid, {})
-        patches = d.get('patches', [])
-        br = branching_eval.get(iid, {})
-        traj_results = {t['trajectory_id']: t['resolved'] for t in br.get('trajectories', [])}
+    left_instances = ORDER[:5]
+    right_instances = ORDER[5:]
 
-        n_p = max(len(patches), 1)
-        inst_top = y
-        inst_bottom = y + (n_p - 1) * ROW_H
+    for col_idx, (ax, inst_list) in enumerate(zip(axs, [left_instances, right_instances])):
+        ax.set_xlim(-1.8, 5.5)
+        ax.axis('off')
 
-        # Instance label on the left
-        mid_y = (inst_top + inst_bottom) / 2
-        ax.text(-0.15, mid_y, f'sympy-{num}', ha='right', va='center', fontsize=5.5, fontweight='bold')
+        y = 0
+        for i, num in enumerate(inst_list):
+            iid = f'sympy__sympy-{num}'
+            d = summary['instances'].get(iid, {})
+            patches = d.get('patches', [])
 
-        if not patches:
-            ax.text(0.2, y, 'no patches', ha='left', va='center', fontsize=5, color=C_GRAY, style='italic')
-            y += ROW_H + INST_GAP
-            continue
+            n_p = max(len(patches), 1)
+            mid_y = y + (n_p - 1) * ROW_H / 2
+            ax.text(-0.05, mid_y, f'sympy-{num}', ha='right', va='center', fontsize=4.5, fontweight='bold')
 
-        # Draw fork point
-        ax.plot([FORK_X, FORK_X], [inst_top, inst_bottom], color='#D1D5DB', linewidth=0.6, solid_capstyle='round')
+            if not patches:
+                ax.text(0.2, y, '(no patches)', ha='left', va='center', fontsize=4, color=C_GRAY, style='italic')
+                y += ROW_H + INST_GAP
+                continue
 
-        for j, p in enumerate(patches):
-            tid = p['trajectory_id']
-            plen = p['patch_len']
-            is_sdlg = 'sdlg' in tid
-            resolved = traj_results.get(tid, False)
-            row_y = y + j * ROW_H
+            ax.plot([FORK_X, FORK_X], [y, y + (n_p - 1) * ROW_H],
+                    color='#D1D5DB', linewidth=0.5, solid_capstyle='round')
 
-            # Color: purple=SDLG, blue=strategy/root
-            if is_sdlg:
-                color = C_SDLG
-            else:
-                color = C_BRANCH
+            for j, p in enumerate(patches):
+                tid = p['trajectory_id']
+                plen = p['patch_len']
+                is_sdlg = 'sdlg' in tid
+                color = C_SDLG if is_sdlg else C_BRANCH
+                row_y = y + j * ROW_H
+                bar_x = 0.12
 
-            # Horizontal connector from fork to bar
-            bar_x = 0.15
-            ax.plot([FORK_X, bar_x], [row_y, row_y], color='#D1D5DB', linewidth=0.5)
+                ax.plot([FORK_X, bar_x], [row_y, row_y], color='#D1D5DB', linewidth=0.4)
+                w = max(0.3, min(2.8, plen / 800))
+                ax.barh(row_y, w, left=bar_x, height=BAR_H, color=color, alpha=0.85,
+                        edgecolor='white', linewidth=0.3)
 
-            # Bar proportional to patch size
-            w = max(0.5, min(4.0, plen / 700))
-            ax.barh(row_y, w, left=bar_x, height=BAR_H, color=color, alpha=0.85,
-                    edgecolor='white', linewidth=0.3)
+                label = tid.replace('t0_', '').replace('strategy_', 'S').replace('sdlg_', 'D')
+                if tid == 't0':
+                    label = 'root'
+                ax.text(bar_x + w + 0.05, row_y, f'{label}  {plen}ch',
+                        ha='left', va='center', fontsize=3.5, color='#6B7280')
 
-            # Label inside or after bar
-            label = tid.replace('t0_', '').replace('strategy_', 'S').replace('sdlg_', 'D')
-            if tid == 't0':
-                label = 'root'
+            y += n_p * ROW_H + INST_GAP
 
-            label_text = f'{label}  {plen}ch'
-            ax.text(bar_x + w + 0.08, row_y, label_text,
-                    ha='left', va='center', fontsize=4, color='#6B7280')
-
-        y += n_p * ROW_H + INST_GAP
-
-    ax.set_ylim(-0.3, y)
-    ax.invert_yaxis()
+        ax.set_ylim(-0.15, y)
+        ax.invert_yaxis()
 
     legend_elements = [
         mpatches.Patch(color=C_BRANCH, alpha=0.85, label='Strategy branch'),
         mpatches.Patch(color=C_SDLG, alpha=0.85, label='SDLG branch'),
     ]
-    ax.legend(handles=legend_elements, loc='lower right', fontsize=5,
-              frameon=True, fancybox=False, edgecolor='#D1D5DB')
-    ax.set_title('Trajectory Branching Tree: 10 SWE-bench Instances, 54 Unique Patches')
+    fig.legend(handles=legend_elements, loc='lower center', ncol=2, fontsize=5,
+               frameon=True, fancybox=False, edgecolor='#D1D5DB',
+               bbox_to_anchor=(0.5, -0.02))
+    fig.suptitle('Trajectory Branching Tree: 10 Instances, 54 Unique Patches', fontsize=7)
 
-    fig.savefig('results/branching/figures/fig2_branching_tree.svg')
+    fig.savefig('results/branching/figures/fig2_branching_tree.svg', bbox_inches='tight', pad_inches=0.03)
 print('Figure 2: Branching tree saved')
 
 
 # ════════════════════════════════════════════════════════════════════════════════
 # FIGURE 3: Pipeline Architecture
 # ════════════════════════════════════════════════════════════════════════════════
-with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.22) as (fig, ax):
+# Use get_mpl_rcParams so we can build a custom figure with proper NeurIPS styling
+# but without constrained_layout fighting our manual placement.
+_rc3, _w3, _h3 = prp.get_mpl_rcParams(layout=Layout.NEURIPS, width_frac=1, height_frac=0.42)
+with plt.rc_context(_rc3):
+    fig3 = plt.figure(figsize=(_w3, _h3))
+    ax = fig3.add_axes([0, 0, 1, 1])  # fill the entire figure
     ax.set_xlim(0, 10)
-    ax.set_ylim(0, 3.5)
+    ax.set_ylim(1.0, 7.0)
     ax.axis('off')
 
-    def draw_phase(x, y, w, h, color, title, items):
-        rect = mpatches.FancyBboxPatch((x, y), w, h, boxstyle='round,pad=0.08',
-                                         facecolor=color, alpha=0.12, edgecolor=color, linewidth=1)
-        ax.add_patch(rect)
-        ax.text(x + w/2, y + h - 0.2, title, ha='center', va='top', fontsize=6.5, fontweight='bold', color=color)
-        for i, item in enumerate(items):
-            ax.text(x + w/2, y + h - 0.6 - i*0.35, item, ha='center', va='top', fontsize=5, color='#374151')
+    # ─── Font sizes from NeurIPS style: footnote=8, script=7 ───
+    FS_TITLE = 8       # phase titles (footnote size)
+    FS_BODY  = 6.5     # body text
+    FS_MATH  = 7       # math expressions (script size)
+    FS_NOTE  = 6       # annotations / captions
+    LW = 0.625         # half of NeurIPS linewidth (1.25) for box borders
 
-    def draw_arrow(x1, x2, y):
+    # ─── Muted NeurIPS-friendly palette ───
+    PAL = {
+        'search':   ('#4B5563', '#F9FAFB', '#E5E7EB'),  # gray: text, fill, border
+        'strategy': ('#065F46', '#ECFDF5', '#A7F3D0'),  # green
+        'patch':    ('#1E40AF', '#EFF6FF', '#BFDBFE'),  # blue
+        'eval':     ('#5B21B6', '#F5F3FF', '#DDD6FE'),  # purple
+    }
+
+    # ─── Phase box drawing ───
+    def phase_box(x, y, w, h, key, num, title, lines):
+        tc, fc, ec = PAL[key]
+        # Box
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x, y), w, h, boxstyle='round,pad=0.12',
+            facecolor=fc, edgecolor=ec, linewidth=LW, zorder=1))
+        # Header bar
+        hdr_h = 0.42
+        ax.add_patch(mpatches.FancyBboxPatch(
+            (x, y + h - hdr_h), w, hdr_h, boxstyle='round,pad=0.12',
+            facecolor=ec, edgecolor=ec, linewidth=LW, zorder=2))
+        # Number + title
+        ax.text(x + 0.18, y + h - hdr_h/2, f'{num}', fontsize=FS_TITLE,
+                fontweight='bold', color=tc, va='center', ha='left', zorder=3)
+        ax.text(x + 0.42, y + h - hdr_h/2, title, fontsize=FS_TITLE,
+                fontweight='bold', color=tc, va='center', ha='left', zorder=3)
+        # Body lines
+        for i, (txt_str, is_math) in enumerate(lines):
+            fs = FS_MATH if is_math else FS_BODY
+            c = tc if is_math else '#374151'
+            ax.text(x + 0.18, y + h - hdr_h - 0.22 - i * 0.32, txt_str,
+                    fontsize=fs, color=c, va='top', ha='left', zorder=3)
+
+    # ─── Arrow helpers ───
+    def harrow(x1, x2, y, color='#9CA3AF'):
         ax.annotate('', xy=(x2, y), xytext=(x1, y),
-                     arrowprops=dict(arrowstyle='->', color='#6B7280', lw=0.8))
+                    arrowprops=dict(arrowstyle='->', color=color, lw=LW*2))
 
-    # Phase boxes — full width, no infrastructure row
-    bh = 2.8
-    by = 0.3
-    mid = by + bh/2
+    def varrow(x, y1, y2, color='#9CA3AF'):
+        ax.annotate('', xy=(x, y2), xytext=(x, y1),
+                    arrowprops=dict(arrowstyle='->', color=color, lw=LW*2))
 
-    draw_phase(0.1, by, 2.2, bh, C_GRAY, 'SEARCH',
-               ['Single trajectory (t0)', 'Read-only commands', 'NLI relevance scoring', 'Saturation detection',
-                'Context pruning'])
-    draw_arrow(2.35, 2.65, mid)
+    # ─── Layout: 2×2 grid ───
+    bw = 4.45           # box width
+    gap_h = 0.65        # horizontal gap (for arrows)
+    gap_v = 0.55        # vertical gap (for arrows)
+    x_l = 0.15          # left column x
+    x_r = x_l + bw + gap_h  # right column x
+    bh_top = 2.65       # top row height
+    bh_bot = 2.45       # bottom row height
+    y_top = 7.0 - bh_top - 0.05
+    y_bot = y_top - gap_v - bh_bot
 
-    draw_phase(2.7, by, 2.2, bh, C_PASS, 'STRATEGY\nPROPOSAL',
-               ['LLM proposes K=5 strategies', 'DeBERTa bidirectional NLI', 'Semantic clustering',
-                'H = -Sum p(c) ln p(c)'])
-    draw_arrow(4.95, 5.25, mid)
+    # ─── Phase 1: Search ───
+    phase_box(x_l, y_top, bw, bh_top, 'search', '1', 'Search', [
+        ('Single trajectory $t_0$; read-only commands', False),
+        ('ReAct loop: Thought $\\to$ Action $\\to$ Observation', False),
+        ('LLM relevance:  $r(o_i) = \\mathrm{LLM\\_score}(q,\\, o_i) \\,/\\, 10$', True),
+        ('Saturation: 3 consecutive $r(o_i) < 0.5$', True),
+        ('Output: search report (files + context)', False),
+    ])
 
-    draw_phase(5.3, by, 2.2, bh, C_BRANCH, 'PATCH + VERIFY',
-               ['Per-strategy trajectories', 'SDLG token attribution', 'Within-strategy branching',
-                'Docker-isolated execution', 'git diff patch submission'])
-    draw_arrow(7.55, 7.85, mid)
+    # ─── Phase 2: Strategy Proposal ───
+    phase_box(x_r, y_top, bw, bh_top, 'strategy', '2', 'Strategy Proposal', [
+        ('LLM proposes $K{=}5$ fix strategies $\\{S_k\\}$', True),
+        ('Bidirectional NLI entailment clustering:', False),
+        ('$S_i{\\equiv}S_j \\Leftrightarrow P(e|S_i,S_j){>}\\theta \\wedge P(e|S_j,S_i){>}\\theta$', True),
+        ('Semantic entropy:  $H = -\\sum_c p(c)\\ln p(c)$', True),
+        ('$H > \\tau \\Rightarrow$ fork one trajectory per cluster', True),
+    ])
 
-    draw_phase(7.9, by, 2.0, bh, C_SDLG, 'EVALUATION',
-               ['SWE-bench harness', 'FAIL_TO_PASS tests', 'PASS_TO_PASS tests',
-                'pass@1 & diverse-pass@1'])
+    # ─── Phase 3: Patch + Verify (right side, below Phase 2) ───
+    phase_box(x_r, y_bot, bw, bh_bot, 'patch', '3', 'Patch + Verify', [
+        ('Per-cluster trajectory in Docker container', False),
+        ('SDLG: $\\nabla_{\\mathbf{e}}\\mathcal{L}_{\\mathrm{NLI}}$ attributes', True),
+        ('  high-impact tokens $\\to$ substitute $\\to$ $N{=}5$ alts', True),
+        ('Cluster SDLG alternatives; branch if $H > \\tau$', True),
+        ('Verify: pytest $\\to$ git diff $\\to$ submit patch', False),
+    ])
 
-    fig.savefig('results/branching/figures/fig3_pipeline.svg')
+    # ─── Phase 4: Evaluation (left side, below Phase 1) ───
+    phase_box(x_l, y_bot, bw, bh_bot, 'eval', '4', 'Evaluation', [
+        ('SWE-bench harness per trajectory', False),
+        ('FAIL_TO_PASS: bug-specific unit tests', False),
+        ('PASS_TO_PASS: regression tests', False),
+        ('diverse-pass@1 $= \\mathbb{1}[\\exists\\, t : \\mathrm{pass}(t)]$', True),
+        ('Hard cap: $B{=}30$ trajectories per instance', True),
+    ])
+
+    # ─── Arrows ───
+    mid_top = y_top + bh_top / 2
+    mid_bot = y_bot + bh_bot / 2
+
+    # Phase 1 → Phase 2 (horizontal right)
+    harrow(x_l + bw + 0.04, x_r - 0.04, mid_top, PAL['search'][0])
+
+    # Phase 2 → Phase 3 (straight down)
+    varrow(x_r + bw/2, y_top - 0.04, y_bot + bh_bot + 0.04, PAL['strategy'][0])
+
+    # Phase 3 → Phase 4 (horizontal left)
+    harrow(x_r - 0.04, x_l + bw + 0.04, mid_bot, PAL['patch'][0])
+
+    fig3.savefig('results/branching/figures/fig3_pipeline.svg',
+                 bbox_inches='tight', pad_inches=0.04)
+    fig3.savefig('results/branching/figures/fig3_pipeline.pdf',
+                 bbox_inches='tight', pad_inches=0.04)
+    plt.close(fig3)
 print('Figure 3: Pipeline architecture saved')
 
 
@@ -612,8 +682,8 @@ for num in ORDER:
     traj = json.load(open(f'results/baseline/{iid}/{iid}.traj.json', encoding='utf-8', errors='replace'))
     baseline_steps[num] = len([m for m in traj.get('messages', []) if m.get('role') == 'assistant'])
 
-with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.75,
-                      nrows=5, ncols=2, sharex=False, sharey=True) as (fig, axs):
+with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.5,
+                      nrows=2, ncols=5, sharex=False, sharey=True) as (fig, axs):
     axs_flat = axs.flatten()
 
     for idx, num in enumerate(ORDER):
@@ -658,9 +728,9 @@ with prp.get_context(layout=Layout.NEURIPS, width_frac=1, height_frac=0.75,
         ax.set_ylim(-0.05, 1.05)
         ax.set_xlim(0.5, max(n_search + 0.5, 2))
 
-        if idx >= 8:  # bottom row
-            ax.set_xlabel('Search Step', fontsize=5)
-        if idx % 2 == 0:  # left column
+        if idx >= 5:  # bottom row
+            ax.set_xlabel('Step', fontsize=5)
+        if idx % 5 == 0:  # left column
             ax.set_ylabel('Relevance', fontsize=5)
 
     # Shared legend at bottom
