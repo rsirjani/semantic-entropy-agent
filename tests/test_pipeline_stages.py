@@ -167,3 +167,80 @@ def test_sdlg_defaults_to_reasoning_only(tmp_path):
     assert orch.sdlg.diversify_code is False
     # The generator honors an explicit opt-in.
     assert SDLGGenerator(nli_model=MockNLI(), diversify_code=True).diversify_code is True
+
+
+# ---- (b) strategy-arm tau gate is ENFORCED, not just logged ------------------
+
+class _FakeAgent:
+    messages = [{"role": "assistant", "content": "searched"}]
+
+
+class _FakeRoot:
+    agent = _FakeAgent()
+
+
+def _stub_proposer(orch, strategies):
+    """Bypass the LLM proposer so _propose_strategies runs on fixed strategies."""
+    orch.proposer.build_search_report = lambda *a, **k: "report"
+    orch.proposer.propose = lambda *a, **k: list(strategies)
+
+
+def test_strategy_arm_branches_when_entropy_above_tau(tmp_path):
+    """entropy > tau -> return ALL cluster representatives (branch)."""
+    from src.diversity.clustering import SemanticCluster
+    orch = _make_orchestrator(tmp_path, "strategy_proposal")
+    _stub_proposer(orch, ["fix in a.py", "rewrite b.py", "patch c.py"])
+    orch.clusterer.analyze = lambda *a, **k: {
+        "clusters": [SemanticCluster(indices=[0], representative_idx=0),
+                     SemanticCluster(indices=[1], representative_idx=1),
+                     SemanticCluster(indices=[2], representative_idx=2)],
+        "entropy": 1.09, "should_branch": True, "n_clusters": 3, "strategy": "greedy",
+    }
+    out = orch._propose_strategies(_FakeRoot())
+    assert len(out) == 3  # all three branched
+
+
+def test_strategy_arm_collapses_to_dominant_when_entropy_below_tau(tmp_path):
+    """entropy <= tau -> take ONLY the largest cluster's representative (no branch).
+
+    Mirrors the SDLG arm's early return: both arms read entropy_threshold and ACT
+    on it (R1.5). Previously the strategy arm always branched regardless of tau,
+    which would corrupt the R3.3 tau-sweep ablation.
+    """
+    from src.diversity.clustering import SemanticCluster
+    orch = _make_orchestrator(tmp_path, "strategy_proposal")
+    _stub_proposer(orch, ["fix in a.py", "rewrite b.py", "patch c.py"])
+    # Two strategies in one (dominant) cluster repr=1, one singleton — should_branch False.
+    orch.clusterer.analyze = lambda *a, **k: {
+        "clusters": [SemanticCluster(indices=[0], representative_idx=0),
+                     SemanticCluster(indices=[1, 2], representative_idx=1)],
+        "entropy": 0.0, "should_branch": False, "n_clusters": 2, "strategy": "greedy",
+    }
+    out = orch._propose_strategies(_FakeRoot())
+    assert out == ["rewrite b.py"]  # single dominant-cluster representative only
+
+
+# ---- (R9.1) model is swappable by config across all sub-calls ----------------
+
+def test_model_name_is_config_driven_end_to_end(tmp_path):
+    """A different base model id from config propagates to every LLM sub-call.
+
+    Proves R9.1 model-swappability: intent / relevance / strategy proposer all
+    read model_config.model_name — no hardcoded model survives a config change.
+    """
+    from src.agent.phased_orchestrator import PhasedOrchestrator
+    custom = "openai/some-other-model-13b"
+    orch = PhasedOrchestrator(
+        instance_id="sympy__sympy-test",
+        problem_statement="A bug.",
+        agent_config={"step_limit": 300},
+        model_config={"model_name": custom, "model_kwargs": {}},
+        env_config={},
+        branching_config={"diversity_method": "strategy_proposal",
+                          "results_dir": str(tmp_path)},
+        nli_model=MockNLI(),
+    )
+    assert orch.intent_extractor.model_name == custom
+    assert orch.relevance_scorer.model_name == custom
+    assert orch.proposer.model_name == custom
+    assert orch.model_config["model_name"] == custom

@@ -38,7 +38,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.evaluation.metrics import (
     bootstrap_ci, diverse_pass_at_k, distinct_patch_count, mean_pairwise_distance,
-)
+)  # distinct_patch_count is reused by set_valued_evidence below
 
 import numpy as np
 
@@ -50,26 +50,52 @@ import numpy as np
 def load_predictions(path: str) -> dict[str, list[str]]:
     """instance_id -> list of trajectory patches (drops the duplicated 'primary')."""
     by_instance: dict[str, list[str]] = {}
+    for iid, traj_id, patch in _iter_trajectory_predictions(path):
+        by_instance.setdefault(iid, []).append(patch)
+    return by_instance
+
+
+def _iter_trajectory_predictions(path: str):
+    """Yield (instance_id, trajectory_id, patch) for genuine trajectory rows.
+
+    The best-of duplicate ("primary") row carries no trajectory_id and is skipped
+    so it is never double-counted against the per-trajectory rows.
+    """
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
-            # Per-trajectory rows carry a trajectory_id; the best-of duplicate
-            # ("primary") does not — skip it so patches aren't double-counted.
-            if "trajectory_id" not in rec:
+            tid = rec.get("trajectory_id")
+            if tid is None or tid == "primary":
                 continue
-            by_instance.setdefault(rec["instance_id"], []).append(rec.get("model_patch", "") or "")
-    return by_instance
+            yield rec["instance_id"], tid, (rec.get("model_patch", "") or "")
+
+
+def load_predictions_by_tid(path: str) -> dict[str, dict[str, str]]:
+    """instance_id -> {trajectory_id: patch} for joining patches to eval outcomes."""
+    out: dict[str, dict[str, str]] = {}
+    for iid, traj_id, patch in _iter_trajectory_predictions(path):
+        out.setdefault(iid, {})[traj_id] = patch
+    return out
+
+
+def _eval_files(eval_path: str):
+    return ([eval_path] if eval_path.endswith(".json")
+            else sorted(glob.glob(os.path.join(eval_path, "trajectory_eval_*.json"))))
 
 
 def load_eval(eval_path: str) -> dict[str, list[bool]]:
-    """instance_id -> per-trajectory resolved vector, from trajectory_eval_*.json."""
-    files = ([eval_path] if eval_path.endswith(".json")
-             else sorted(glob.glob(os.path.join(eval_path, "trajectory_eval_*.json"))))
+    """instance_id -> per-trajectory resolved vector, from trajectory_eval_*.json.
+
+    Drops the best-of duplicate ("primary") trajectory so the matched-k count n
+    reflects only GENUINE trajectories — consistent with load_predictions, which
+    skips the same duplicate. (Counting primary would inflate n by 1 and bias the
+    Chen et al. matched-k estimate.)
+    """
     out: dict[str, list[bool]] = {}
-    for fp in files:
+    for fp in _eval_files(eval_path):
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 d = json.load(f)
@@ -78,7 +104,50 @@ def load_eval(eval_path: str) -> dict[str, list[bool]]:
         iid = d.get("instance_id")
         if not iid:
             continue
-        out[iid] = [bool(t.get("resolved")) for t in d.get("trajectories", [])]
+        out[iid] = [bool(t.get("resolved")) for t in d.get("trajectories", [])
+                    if t.get("trajectory_id") != "primary"]
+    return out
+
+
+def load_eval_by_tid(eval_path: str) -> dict[str, dict[str, bool]]:
+    """instance_id -> {trajectory_id: resolved}, for joining to patches (R5.3)."""
+    out: dict[str, dict[str, bool]] = {}
+    for fp in _eval_files(eval_path):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                d = json.load(f)
+        except Exception:
+            continue
+        iid = d.get("instance_id")
+        if not iid:
+            continue
+        for t in d.get("trajectories", []):
+            tid = t.get("trajectory_id")
+            if tid is None or tid == "primary":
+                continue
+            out.setdefault(iid, {})[tid] = bool(t.get("resolved"))
+    return out
+
+
+def set_valued_evidence(predictions_path: str, eval_path: str) -> list[dict]:
+    """R5.3 — instances with >=2 STRUCTURALLY DISTINCT patches that BOTH pass.
+
+    Joins patches to outcomes by trajectory_id (not by index — the two files may
+    order trajectories differently), keeps the passing ones, and counts distinct
+    patch signatures among them. >=2 distinct passing patches is direct evidence
+    that the solution is a SET (case 1 of the mode/uncertainty framing).
+    """
+    preds = load_predictions_by_tid(predictions_path)
+    evals = load_eval_by_tid(eval_path)
+    out: list[dict] = []
+    for iid in sorted(set(preds) & set(evals)):
+        passing = [preds[iid][tid] for tid, ok in evals[iid].items()
+                   if ok and tid in preds[iid]]
+        n_distinct = distinct_patch_count(passing)
+        if n_distinct >= 2:
+            out.append({"instance_id": iid,
+                        "n_passing_trajectories": len(passing),
+                        "n_distinct_passing_patches": n_distinct})
     return out
 
 
@@ -169,9 +238,13 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
     }
 
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
+    # `thr` is computed ONCE here and reused for the R5.4 low-entropy flag below so
+    # the two analyses cannot disagree about which instances are "low entropy".
     ent_shared = {i: entropy[i] for i in shared if i in entropy}
+    thr = split
+    if thr is None and len(ent_shared) >= 2:
+        thr = float(np.median(list(ent_shared.values())))
     if len(ent_shared) >= 2:
-        thr = split if split is not None else float(np.median(list(ent_shared.values())))
         strata = {"low_entropy": [], "high_entropy": []}
         for i in shared:
             if i not in ent_shared:
@@ -185,14 +258,18 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
         }
 
     # R5.4 — off-mode recovery: treatment passed, vanilla did NOT, at LOW entropy.
+    # Uses the SAME `thr` as the stratification above (median of shared, or --entropy-split).
+    # If no entropy split could be established, low_entropy is left None (unknown),
+    # never silently tagged via a hardcoded cutoff.
     off_mode = []
     for i in shared:
         a_pass = table_a[i]["n_resolved"] > 0
         b_pass = table_b[i]["n_resolved"] > 0
         if a_pass and not b_pass:
             e = entropy.get(i)
+            low = (e is not None and thr is not None and e <= thr) if thr is not None else None
             off_mode.append({"instance_id": i, "post_search_entropy": e,
-                             "low_entropy": (e is not None and e <= (split if split is not None else 0.5))})
+                             "low_entropy": low})
     result["off_mode_recovery_candidates"] = off_mode
     result["note"] = ("off_mode_recovery with low_entropy=True is the §0.1 case-3 "
                       "mode-collapse signature the entropy gate cannot predict.")
@@ -219,12 +296,17 @@ def main() -> None:
     args = p.parse_args()
 
     table_a = per_instance_table(load_predictions(args.predictions), load_eval(args.eval))
-    report = {args.label_a: {"summary": summarize(table_a, args.seed), "per_instance": table_a}}
+    set_valued_a = set_valued_evidence(args.predictions, args.eval)
+    report = {args.label_a: {"summary": summarize(table_a, args.seed),
+                             "per_instance": table_a,
+                             "set_valued_instances": set_valued_a}}
 
     print(f"\n=== {args.label_a} ===  ({report[args.label_a]['summary']['n_instances']} instances)")
     for k, v in report[args.label_a]["summary"].items():
         if k != "n_instances":
             print(f"  {k}: {v['mean']}  CI95={v['ci95']}")
+    print(f"  set-valued (>=2 distinct passing patches): {len(set_valued_a)} instance(s) "
+          f"{[s['instance_id'] for s in set_valued_a]}")
 
     if args.compare_predictions and args.compare_eval:
         table_b = per_instance_table(load_predictions(args.compare_predictions),

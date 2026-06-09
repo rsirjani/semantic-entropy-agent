@@ -710,11 +710,23 @@ class PhasedOrchestrator:
         )
         clusters = analysis["clusters"]
         entropy = analysis["entropy"]
+        should_branch = analysis["should_branch"]
 
-        unique_strategies = []
-        for cluster in clusters:
-            rep_idx = cluster.representative_idx
-            unique_strategies.append(strategies[rep_idx])
+        all_reps = [strategies[c.representative_idx] for c in clusters]
+
+        # Adaptive gate (R1.5): branch iff entropy > tau. When entropy <= tau the
+        # proposed strategies are not meaningfully multi-modal, so take the single
+        # dominant (largest) cluster's representative — the greedy/mode action —
+        # exactly as the SDLG arm returns early without forking. Both arms read the
+        # SAME entropy_threshold config key and ACT on it identically; only the
+        # candidate generator differs. (With the default tau=0.0 every non-trivial
+        # entropy branches, so the main run is unaffected; this matters under the
+        # R3.3 tau sweep, where the strategy arm previously branched regardless.)
+        if should_branch:
+            unique_strategies = all_reps
+        else:
+            dominant = max(clusters, key=lambda c: len(c.indices))
+            unique_strategies = [strategies[dominant.representative_idx]]
 
         self.tracer.log(
             "phase2.clustering_result",
@@ -726,7 +738,7 @@ class PhasedOrchestrator:
                     "unique_strategies": unique_strategies},
             scores={"semantic_entropy": round(entropy, 4),
                     "entropy_threshold": tau},
-            decision="BRANCH_ALL" if entropy > tau else "SINGLE_STRATEGY",
+            decision="BRANCH_ALL" if should_branch else "SINGLE_STRATEGY",
             phase="STRATEGY_PROPOSAL",
         )
 
