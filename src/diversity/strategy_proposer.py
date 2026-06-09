@@ -79,10 +79,15 @@ class StrategyProposer:
         model_name: str = "openai/qwen3-coder",
         model_kwargs: dict | None = None,
         n_strategies: int = 5,
+        temperature: float = 1.0,
     ):
         self.model_name = model_name
         self.model_kwargs = model_kwargs or {}
         self.n_strategies = n_strategies
+        # Sampling temperature for strategy proposals. Shared with the vanilla
+        # resample baseline so the two arms differ only in the branching
+        # mechanism, not in their stochasticity budget.
+        self.temperature = temperature
 
     def build_search_report(
         self,
@@ -193,7 +198,7 @@ class StrategyProposer:
             response = litellm.completion(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=1.0,
+                temperature=self.temperature,
                 max_tokens=1200,
                 **kwargs,
             )
@@ -255,7 +260,7 @@ Format: STRATEGY N: [file and function] — [specific code change]"""
             response = litellm.completion(
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=1.0,
+                temperature=self.temperature,
                 max_tokens=800,
                 **kwargs,
             )

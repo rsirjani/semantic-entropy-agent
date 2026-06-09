@@ -202,20 +202,81 @@ def main():
     parser.add_argument("--config", default=None, help="Path to config YAML")
     parser.add_argument("--instances", nargs="*", default=None,
                         help="Specific instance IDs (default: all 10)")
+    parser.add_argument("--results-dir", default=None,
+                        help="Output dir for this run's predictions/logs (overrides "
+                             "paths.results_dir). REQUIRED to keep arms isolated (R2.5): "
+                             "give each diversity_method / clustering_strategy / tau its "
+                             "OWN dir, else a later arm overwrites the earlier one's "
+                             "predictions. predictions_file is derived from it.")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip instances with existing results")
+    parser.add_argument("--clustering-strategy", default=None,
+                        choices=["greedy", "connected", "kernel"],
+                        help="Semantic clustering strategy: 'greedy' (Farquhar/Kuhn "
+                             "Algorithm 1, baseline), 'connected' (order-independent "
+                             "pairwise-graph connected components), or 'kernel' "
+                             "(von Neumann heat-kernel entropy). Overrides config.")
+    parser.add_argument("--kernel-t", type=float, default=None,
+                        help="Heat-kernel diffusion time for --clustering-strategy kernel "
+                             "(overrides config).")
+    parser.add_argument("--dataset", default="verified",
+                        choices=["verified", "lite", "full"],
+                        help="SWE-bench dataset to draw instances from (default: verified).")
+    parser.add_argument("--all", action="store_true",
+                        help="Run EVERY instance in the dataset split (e.g. all of "
+                             "SWE-bench Lite), not just --instances / the 10 targets.")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="Sampling temperature (overrides branching.sample_temperature). "
+                             "Used for the proposer and the vanilla 'none' arm.")
+    parser.add_argument("--diversity-method", default=None,
+                        choices=["strategy_proposal", "sdlg", "none"],
+                        help="Diversity arm (overrides config). 'none' = vanilla single "
+                             "trajectory, used by the matched-k resample baseline.")
+    parser.add_argument("--entropy-threshold", "--tau", type=float, default=None,
+                        dest="entropy_threshold",
+                        help="Branch iff semantic entropy > tau (overrides config). Default "
+                             "config tau=0.0 = always branch (build the full diverse set for "
+                             "the coverage/diversity headline). Sweep this for the adaptive-"
+                             "gate ablation (R3.3): show raising tau prunes branching on low-"
+                             "entropy instances. NOTE: kernel entropy is on a different scale "
+                             "than count-based — recalibrate tau per clustering strategy.")
     args = parser.parse_args()
 
     # Clear any stale cached httpx clients from prior runs
     reset_litellm_clients()
 
     config = load_config(args.config)
+    # CLI overrides for the clustering / branching strategy.
+    if args.clustering_strategy is not None:
+        config.setdefault("branching", {})["clustering_strategy"] = args.clustering_strategy
+        print(f"Clustering strategy (CLI override): {args.clustering_strategy}")
+    if args.kernel_t is not None:
+        config.setdefault("branching", {})["kernel_t"] = args.kernel_t
+    if args.temperature is not None:
+        config.setdefault("branching", {})["sample_temperature"] = args.temperature
+        print(f"Sample temperature (CLI override): {args.temperature}")
+    if args.diversity_method is not None:
+        config.setdefault("branching", {})["diversity_method"] = args.diversity_method
+        print(f"Diversity method (CLI override): {args.diversity_method}")
+    if args.entropy_threshold is not None:
+        config.setdefault("branching", {})["entropy_threshold"] = args.entropy_threshold
+        print(f"Entropy threshold tau (CLI override): {args.entropy_threshold}")
+    if args.results_dir is not None:
+        # Isolate this arm's artifacts (R2.5). Derive predictions_file from the
+        # dir so the all-trajectories file lands beside it and no two arms collide.
+        config.setdefault("paths", {})["results_dir"] = args.results_dir
+        config["paths"]["predictions_file"] = os.path.join(args.results_dir, "predictions.jsonl")
+        print(f"Results dir (CLI override): {args.results_dir}")
     results_dir = os.path.join(PROJECT_ROOT, config["paths"]["results_dir"])
     setup_logging(results_dir)
 
-    instance_ids = args.instances or TARGET_INSTANCE_IDS
-    print(f"Loading SWE-bench instances: {instance_ids}")
-    instances = load_swebench_instances(instance_ids=instance_ids)
+    if args.all:
+        print(f"Loading ALL instances from SWE-bench {args.dataset} ...")
+        instances = load_swebench_instances(dataset_name=args.dataset, all_instances=True)
+    else:
+        instance_ids = args.instances or TARGET_INSTANCE_IDS
+        print(f"Loading SWE-bench {args.dataset} instances: {instance_ids}")
+        instances = load_swebench_instances(dataset_name=args.dataset, instance_ids=instance_ids)
     print(f"Loaded {len(instances)} instances")
 
     # Connect to NLI server (DeBERTa runs in a separate process)

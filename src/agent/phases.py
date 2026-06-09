@@ -13,6 +13,7 @@ Phase 3 — VERIFY: Read-only again. Agent runs tests and reviews changes.
     No branching — just validate the patch.
 """
 
+import re
 from enum import Enum
 
 
@@ -70,24 +71,47 @@ def is_command_allowed(command: str, phase: Phase) -> bool:
     return False
 
 
+# In-place editors / file movers that modify a file by argument (no redirect).
+_WRITE_PREFIXES = ("sed -i", "tee ", "patch ", "dd ", "truncate ", "mv ", "cp ")
+
+# A stdout redirect (`>` or `>>`) to a real file. Excludes, via lookarounds:
+#   - stderr / fd redirects: 2>, 1>, &>   (digit or & immediately before `>`)
+#   - fd duplications:       >&1, >&2     (`&` immediately after the spaces)
+#   - the null sink:         > /dev/null
+_REDIRECT_RE = re.compile(r"(?<![0-9&])>>?\s*(?!&)(?!/dev/null\b)\S")
+
+
 def is_write_command(command: str) -> bool:
-    """Check if a command modifies files (used to detect patch actions)."""
+    """Check if a command modifies a file on disk (used to detect patch actions).
+
+    Detects in-place editors (sed -i, tee, patch), file movers (mv/cp/dd/
+    truncate), and stdout redirects (`>` / `>>`) to a real file.
+
+    Deliberately NOT classified as writes (these were false positives in the
+    earlier prefix-only heuristic and could mis-trigger SDLG):
+      - the submission command (echoes the sentinel, then cats patch.txt),
+      - bare `echo` / `printf` with no redirect,
+      - stderr-only redirects (`2>`, `&>`, `2>&1`) and fd dups (`>&1`),
+      - redirects to /dev/null.
+
+    Known limitation: a redirect of program output to a scratch file
+    (e.g. `python repro.py > out.txt`) is treated as a write. Distinguishing a
+    source edit from a scratch-file write is not reliable from the command
+    string alone; callers that need precision should diff the working tree.
+    """
     cmd = command.strip()
+    # The submission command is `echo <sentinel> && cat patch.txt` — not a write.
+    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in cmd:
+        return False
+    # Use the final command in a "cd ... && <action>" chain (the actual action).
     if "&&" in cmd:
         cmd = cmd.split("&&")[-1].strip()
 
-    write_prefixes = {"sed -i", "patch", "cat <<", "tee ", "mv ", "cp ", "echo "}
-    # Also catch redirects
-    if ">" in cmd and ">>" not in cmd and ">/dev/null" not in cmd:
-        return True
-    if ">>" in cmd:
-        return True
-
-    for prefix in write_prefixes:
+    for prefix in _WRITE_PREFIXES:
         if cmd.startswith(prefix):
             return True
 
-    return False
+    return bool(_REDIRECT_RE.search(cmd))
 
 
 # Phase-specific system prompts (appended to the base system prompt)
@@ -166,6 +190,35 @@ Step 1: cd /testbed && git diff -- <modified files> > patch.txt
 Step 2: Verify patch.txt
 Step 3: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /testbed/patch.txt
 """
+
+
+def should_end_search(
+    step: int,
+    consecutive_low_relevance: int,
+    min_search_steps: int,
+    low_relevance_streak: int,
+    max_search_steps: int,
+) -> str | None:
+    """Decide whether the SEARCH phase should end, and why.
+
+    Pure decision function (no I/O) extracted from the orchestrator's search
+    loop so the saturation / step-cap policy is testable without a GPU run.
+
+    Returns:
+        "saturated"  — at least `min_search_steps` taken AND `low_relevance_streak`
+                       consecutive low-relevance steps (the normal exit).
+        "step_limit" — the hard `max_search_steps` fallback cap was reached
+                       (guards against looping on blocked, unscored commands).
+        None         — keep searching.
+
+    Saturation is checked first so a well-behaved run exits via relevance, not
+    the cap. The cap is a fallback only.
+    """
+    if step >= min_search_steps and consecutive_low_relevance >= low_relevance_streak:
+        return "saturated"
+    if step >= max_search_steps:
+        return "step_limit"
+    return None
 
 
 def detect_phase_transition(thought: str, action: str, current_phase: Phase) -> Phase | None:

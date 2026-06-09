@@ -91,11 +91,19 @@ class SDLGGenerator:
         n_candidates: int = 5,
         top_k_substitutes: int = 20,
         importance_threshold: float = 0.001,
+        diversify_code: bool = False,
     ):
         self.nli = nli_model
         self.n_candidates = n_candidates
         self.top_k = top_k_substitutes
         self.importance_threshold = importance_threshold
+        # Faithful SDLG (Aichberger 2025) substitutes tokens in the REASONING
+        # only — the rubric (R1.1) and CLAUDE.md both require "substitutions
+        # apply to reasoning, NOT action tokens", because NLI gradients are
+        # meaningful on natural language but near-random on bash tokens. Code-
+        # level substitution is therefore an explicit, OFF-by-default extension;
+        # enable it only if you intend to claim/ablate it separately.
+        self.diversify_code = diversify_code
 
         # Cache the NLI embedding matrix (used for substitution scores)
         self._emb_matrix = None
@@ -140,10 +148,17 @@ class SDLGGenerator:
         """
         candidates = [greedy_response]
 
-        # Split: thought-level alternatives get the majority (more impactful),
-        # code-level alternatives fill the rest
-        n_thought = max(1, (self.n_candidates - 1 + 1) // 2)  # ceil half
-        n_code = (self.n_candidates - 1) - n_thought
+        # Reasoning-only by default (R1.1 / CLAUDE.md: substitutions apply to
+        # reasoning, NOT action tokens). All of the budget goes to thought-level
+        # SDLG unless code-level substitution is explicitly enabled.
+        if self.diversify_code:
+            # Split: thought-level alternatives get the majority (more impactful),
+            # code-level alternatives fill the rest
+            n_thought = max(1, (self.n_candidates - 1 + 1) // 2)  # ceil half
+            n_code = (self.n_candidates - 1) - n_thought
+        else:
+            n_thought = self.n_candidates - 1
+            n_code = 0
 
         # --- THOUGHT-level SDLG ---
         thought_text, code_and_rest = extract_thought_text(greedy_response)
@@ -163,7 +178,10 @@ class SDLGGenerator:
             logger.info(f"SDLG THOUGHT: generated {len(thought_alts)} alternatives")
         else:
             logger.warning("SDLG: thought text too short for attribution, skipping thought-level")
-            n_code = self.n_candidates - 1  # All budget goes to code
+            # Only redirect budget to code if code-level SDLG is enabled;
+            # otherwise stay reasoning-only and let the temperature fallback fire.
+            if self.diversify_code:
+                n_code = self.n_candidates - 1  # All budget goes to code
 
         # --- CODE-level SDLG ---
         preamble, code_text, postamble = extract_code_block(greedy_response)

@@ -318,14 +318,59 @@ Propose \texttt{\{n\_more\}} NEW strategies targeting DIFFERENT code locations u
 
 \subsection{DeBERTa NLI Classification}
 
-\textbf{Model}: DeBERTa-large fine-tuned on MNLI.
+\subsubsection{Architecture (He et al.\ 2021)}
+
+DeBERTa improves BERT with two ideas:
+
+\begin{enumerate}[nosep,leftmargin=10pt]
+\item \textbf{Disentangled attention} --- each token $i$ is represented by two vectors: content $\bm{H}_i$ and relative position $\bm{P}_{i|j}$. Attention decomposes into three terms:
+\end{enumerate}
+
+\begin{mathbox}[title=Disentangled Attention]
+{\small
+\[
+A_{ij} = \underbrace{Q_i^c {K_j^c}^\top}_{\text{c2c}} + \underbrace{Q_i^c {K_{\delta}^r}^\top}_{\text{c2p}} + \underbrace{Q_{\delta}^r {K_j^c}^\top}_{\text{p2c}}
+\]
+}
+{\scriptsize Scaled by $1/\sqrt{3d}$. p2p term dropped (no content info). $\delta{=}\delta(i,j)$ = relative distance, clamped to $[0, 2k)$.}
+\end{mathbox}
+
+\begin{enumerate}[nosep,leftmargin=10pt]\setcounter{enumi}{1}
+\item \textbf{Enhanced mask decoder} --- absolute positions are incorporated \emph{after} all transformer layers (just before the softmax for MLM), not at the input like BERT. This lets the encoder use only relative positions.
+\end{enumerate}
+
+\subsubsection{Pre-training}
+
+Masked language modeling (MLM) on large text corpora --- same objective as BERT/RoBERTa. DeBERTa-large: 24 layers, 1024 hidden, 16 heads.
+
+\subsubsection{Fine-tuning on MNLI}
+
+MNLI = 433k labeled (premise, hypothesis) pairs, each labeled \{entailment, neutral, contradiction\}. Fine-tuning adds a classification head on top:
+
+\begin{scriptsize}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Component} & \textbf{Detail} \\
+\midrule
+Encoder & DeBERTa $\to$ hidden states $[B, T, D]$ \\
+ContextPooler & Dense + activation on \texttt{[CLS]} token \\
+Dropout & Applied to pooled output \\
+Classifier & Linear$(D, 3)$ $\to$ 3 logits \\
+Loss & CrossEntropyLoss(logits, label) \\
+\bottomrule
+\end{tabular}
+\end{scriptsize}
+
+\subsubsection{Tokenization \& Input Format}
 
 \textbf{Input}: (premise, hypothesis) pair $\to$ tokenized as:
 \[
-\texttt{[CLS]}\;\text{premise}\;\texttt{[SEP][SEP]}\;\text{hypothesis}\;\texttt{[SEP]}
+\texttt{[CLS]}\;\text{premise}\;\underbrace{\texttt{[SEP][SEP]}}_{\text{2 seps}}\;\text{hypothesis}\;\texttt{[SEP]}
 \]
 
-\textbf{Forward pass}: DeBERTa $\to$ logits $\bm{l} = (l_0, l_1, l_2) \in \mathbb{R}^3$
+{\scriptsize \textbf{Why two \texttt{[SEP]}s?} DeBERTa V1 uses GPT-2 BPE vocab with BERT-style special tokens. HuggingFace's \texttt{DebertaTokenizer} places two \texttt{[SEP]} between pairs (verified empirically). All \texttt{token\_type\_ids} = 0 --- DeBERTa uses separator \emph{positions}, not type IDs, to distinguish premise from hypothesis.}
+
+\subsubsection{Output}
 
 \begin{mathbox}[title=Softmax to Probabilities]
 \[

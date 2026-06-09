@@ -1,0 +1,413 @@
+# Gold Standard — Definition of "Publication-Ready" for this project
+
+This document is the **objective rubric** the autonomous review/improve loop
+(`scripts/review_improve_loop.py`) scores the repository against. It defines what
+a high-quality, publishable version of *Semantic Entropy Clustering for Diverse
+Agentic Code Generation* looks like, so that "ready for the paper" is a checklist
+verdict, not a vibe. Every iteration must score each rubric item as
+`pass | partial | fail` **with an evidence pointer** (file path, command, or
+results artifact), and may only declare `gold_standard_met: true` when every
+**[BLOCKER]** item is `pass` and no `blocking_gaps` remain.
+
+**Spec evolution — the ratchet.** This rubric may *improve*, but only toward more
+rigor, and never in a way the optimizer can use to grade itself into a pass. Two
+channels:
+
+- **Auto-applicable corrections.** The loop MAY directly edit this file to apply a
+  *correction* — an amendment that is mathematically or logically **derivable** (a
+  biased estimator, an inconsistent definition, a broken identity) AND that
+  **increases** rigor. It must record the derivation + classification in
+  `review_loop/spec_amendments/`.
+- **Quarantined proposals.** Any amendment that **relaxes** a BLOCKER, rests on a
+  **value / convention** judgment (what counts as "enough", what diversity
+  "means"), or would make the **current artifact pass** MUST NOT be applied — it is
+  written as a proposal in `review_loop/spec_amendments/` for human ratification.
+
+Enforcement is external, not trusted: after every iteration an independent
+adversarial **spec-critic** reviews any change to this file, and the wrapper
+**reverts** it unless the critic confirms it is a derivable, rigor-increasing
+correction that lowers no BLOCKER and is not self-serving. The agent therefore
+cannot move the finish line toward itself — the bar may get harder for provable
+reasons; it may not get easier for convenient ones.
+
+**Section order:** §0/§0.1 are framing; §1–§9 are the rubric (all BLOCKERs come
+first, §1–§8; §9 is a tracked roadmap dimension); §10 (writeup) is last because it
+*consumes* everything above and is the only non-blocker rubric section.
+
+---
+
+## 0. The claim we are defending
+
+**Headline (a diversity claim, not a leaderboard claim):** at a *matched
+trajectory budget and matched sampling temperature*, vanilla LLM resampling
+mode-collapses to a few semantic forms, whereas semantic-entropy-guided branching
+explores meaningfully distinct solutions — and is therefore more likely to
+contain a passing fix. The contribution is the **semantic-entropy-gated branching
+core**; the candidate generator (strategy-proposal vs SDLG) is a pluggable,
+ablated input.
+
+A **rigorous null/negative result is still publishable** — if branching does *not*
+beat vanilla, the paper reports that honestly with the same statistical care. The
+loop must NOT optimize toward a positive result; it optimizes toward *trustworthy
+evidence either way*.
+
+---
+
+## 0.1 Why diversity helps — the holistic framing  `[narrative spine]`
+
+**Unifying principle:** greedy / low-temperature decoding returns the *mode* of the
+model's solution distribution; diversity is valuable precisely when the correct
+solution is **not that mode**. Do NOT reduce this to any single mechanism (in
+particular, not to "the answer is a set"). The mismatch between where the model
+concentrates probability mass and where a correct solution lies arises for several
+distinct reasons, and the paper must treat them as a holistic family:
+
+1. **Multiplicity (aleatoric).** The problem is genuinely multi-valued —
+   under-specified PRs, preference-laden choices, several structurally different
+   patches that all pass. The answer *is a set*; diversity covers it and pass@k
+   rises mechanically with set size.
+2. **Residual epistemic uncertainty (post-search).** There is a single right fix,
+   but after SEARCH the model still spreads belief over candidates and the correct
+   one is not the argmax. Diversity surfaces the non-argmax candidate. SEARCH
+   exists to *reduce* this; what remains is what branching exploits.
+3. **Distributional / mode-collapse bias — EVEN WHEN THE ANSWER IS A SINGLE
+   POINT.** This is the core motivation and the one the earlier framing missed.
+   Pretraining frequency bias and RLHF sharpening concentrate sampling on a few
+   "typical"/safe modes; a *better, correct* trajectory can exist in the model's
+   support but in a low-probability region it rarely samples. Diversity (higher
+   temperature, semantic branching, SDLG's targeted off-mode token substitution,
+   cross-model pooling) deliberately explores *off the dominant mode* to reach it.
+   Here diversity helps not because the answer is a set, but because the model's
+   default concentration is a biased artifact of training that under-weights the
+   true answer (knowledge collapse — Wright 2025; reduced variety — NoveltyBench,
+   Zhang 2025).
+4. **Multi-step compounding.** In an agent, an early commitment (a search finding,
+   a reasoning step) determines which region of solution space is even reachable;
+   a single trajectory locks in and cannot recover. Trajectory-level diversity
+   hedges against early lock-in — distinct from token-level diversity.
+5. **Model-space bias (§9).** Any one model is a single biased draw from "model
+   space"; some correct solutions lie outside its well-sampled support entirely.
+   Cross-model / ensemble diversity reaches solutions no single model covers — the
+   limiting case of (3), where resampling one model cannot add mass that is not
+   there.
+
+**Semantic entropy as a proxy — and its blind spot.** High post-search semantic
+entropy signals a *spread* distribution (cases 1–2), so the adaptive gate (branch
+iff entropy > τ) spends diversity where the distribution is visibly multi-modal and
+saves it where the mode is already decisive. But entropy measures *spread, not
+correctness*: under case 3, mode collapse can make the model **confidently wrong**
+— low entropy over a biased mode — which the entropy gate will NOT flag. That blind
+spot is exactly why the paper carries mechanisms that do not depend on the model's
+own confidence: SDLG forces off-mode exploration by construction, and cross-model
+diversity (§9) escapes a single model's bias. The arms are therefore *complementary,
+not redundant*, and the ablations must be read in that light.
+
+Falsifiable predictions (test, do not assume):
+- Branching's benefit over matched-k vanilla is **largest where the correct
+  solution is off the model's mode** — partly predicted by post-search entropy
+  (cases 1–2), but ALSO appearing on *low-entropy* instances where vanilla
+  collapsed to a confident wrong mode and a diverse mechanism recovered the fix
+  (case 3). The analysis must therefore look *beyond entropy alone*.
+- It is ≈0 on instances where greedy already sits on the correct mode
+  (straightforward, low-uncertainty, unbiased) — diversity then only costs compute.
+
+Consequences this rubric enforces: (i) entropy is measured *after* SEARCH (R1.5,
+§2); (ii) §5 stratifies the diversity benefit by uncertainty AND separately examines
+off-mode recovery on low-entropy instances, so the narrative is never reduced to
+"set vs point"; (iii) model identity is itself a diversity/uncertainty axis (§9).
+
+---
+
+## 1. Faithfulness to the reference methods  `[BLOCKER]`
+
+The implementation must match (or deliberately, documentedly improve on) the
+methods in `PDFs/`. Each sub-item names the source of truth.
+
+- **R1.1 — SDLG (Aichberger 2025, `PDFs/Aichberger_2025_SDLG.pdf`, Alg. 1 & 2).**
+  Gradient-based token attribution through a DeBERTa NLI model; rank
+  (position, substitute) pairs by attribution × substitution × importance;
+  substitute the high-impact token and let the LLM complete from the substitution
+  point. Substitutions apply to **reasoning, not action tokens**. Verify
+  `src/diversity/sdlg.py` implements this and that the branch point is a genuine
+  write step (`phases.is_write_command`), not `echo`/submit/stderr redirects.
+- **R1.2 — Semantic entropy & bidirectional-entailment clustering**
+  (Farquhar 2024 `PDFs/farquhar_nature.pdf`; Kuhn 2023
+  `PDFs/Farquhar_2024_Semantic_Entropy.pdf`, Alg. 1). The `greedy` clusterer must
+  reproduce Algorithm 1; clustering is **context-conditioned** (problem statement
+  prepended) consistently at every call site. Discrete SE = `-Σ p_c log p_c`.
+- **R1.3 — Clustering ablation variants.** `connected` (order-independent
+  transitive closure) and `kernel` (Kernel Language Entropy, Nikitin 2024 — a
+  genuine graph heat kernel `exp(-tL)`, von Neumann entropy of `ρ=K_t/tr K_t`,
+  recovering `log K` in the well-separated limit) are correctly implemented and
+  *correctly cited*. No method is described as something it is not.
+- **R1.4 — Agent loop (ReAct, Yao 2023).** Phased SEARCH→PATCH→VERIFY with the
+  documented tool-access boundaries per phase.
+- **R1.5 — Adaptive branching.** Branch iff semantic entropy `> τ`; the τ gate is
+  read from the *same* config key in every arm (no hardcoded divergence).
+
+*Pass:* every sub-item verified against code with a file:line pointer, and any
+deviation from a paper is intentional and documented (not a bug).
+
+---
+
+## 2. Experimental arms — scaffold- and temperature-matched  `[BLOCKER]`
+
+- **R2.1 — Treatment arm(s) present and runnable:** `strategy_proposal` (and, if
+  claimed, `sdlg`).
+- **R2.2 — Matched-k vanilla control present and runnable:** `diversity_method:
+  "none"` run **k times per instance**, where `k = #trajectories the treatment
+  produced` (`scripts/run_resample_baseline.py`).
+- **R2.3 — Scaffold-matched:** the control is the *same phased agent* with
+  branching disabled — NOT the legacy `ReactAgent` baseline (that confounds
+  branching with a different harness). Confirm the comparison used in the paper
+  uses the phased `none` arm.
+- **R2.4 — Temperature-matched:** one `sample_temperature` knob drives both the
+  proposer and the vanilla baseline; the headline runs a sweep (0.2/0.7/1.0).
+  Vanilla MUST sample at T>0 (temp=0 = deterministic = a strawman).
+- **R2.5 — Results isolation:** each arm/temperature/clustering-strategy writes a
+  **separate results dir**; no run overwrites another's predictions.
+
+---
+
+## 3. Ablations  `[BLOCKER for the ones claimed; otherwise scope explicitly]`
+
+- **R3.1 — Diversity generator:** strategy_proposal vs sdlg, isolated (never
+  stacked), each attributable.
+- **R3.2 — Clustering strategy:** greedy vs connected vs kernel, each into its own
+  results dir; τ recalibrated for kernel (non-transferable scale, documented).
+- **R3.3 — τ / entropy-gate sensitivity:** at least a documented plan or a run
+  showing branch-rate vs τ.
+
+*Pass:* each ablation either has results, or is explicitly de-scoped in the
+writeup with justification.
+
+---
+
+## 4. Metrics — independent and unbiased  `[BLOCKER]`
+
+- **R4.1 — Coverage:** `diverse-pass@k` computed with the **unbiased Chen et al.
+  (2021) estimator** on *both* arms, at matched k. Oracle/coverage framing stated
+  honestly (it is an upper bound, not deployable accuracy).
+- **R4.2 — Diversity measured INDEPENDENTLY of the branching signal.** The
+  diversity of the final outputs must NOT be measured with the same DeBERTa-NLI
+  clustering used to *decide* branching (circular). Use an independent metric over
+  **final patches** — structural/AST or normalized edit distance, and/or
+  behavioral diversity — reported as distinct-solution counts per arm. This metric
+  must exist as a runnable script over the predictions artifacts.
+- **R4.3 — Diversity measured on FINAL patches, not proposal-time branches**
+  (branches can converge downstream).
+- **R4.4 (strengthening, not blocker) — Selection-aware accuracy:** a selector
+  (majority cluster / regression tests) → `selected-pass@1`, so the paper does not
+  overclaim the oracle number.
+
+---
+
+## 5. Diversity-benefit analysis (uncertainty AND mode-collapse)  `[BLOCKER for the narrative]`
+
+The headline thesis (§0.1) is that diversity helps when the correct solution is off
+the model's mode — driven by *several* mechanisms, not just uncertainty. A pooled
+average hides this; the analysis must decompose the benefit by mechanism. (This
+sits right after the metrics it consumes — it turns coverage/diversity numbers into
+the paper's central claim.) The analysis must NOT reduce the story to "set vs
+point"; it must cover at least the entropy-driven and the mode-collapse-driven
+cases separately.
+
+- **R5.1** The full §0.1 framing (all five mechanisms + the entropy blind spot) is
+  reflected in the writeup (see R10.3) — not just the set-valued case.
+- **R5.2 — Stratified benefit (cases 1–2).** A runnable script buckets instances by
+  *post-search semantic entropy* (per instance: `phased_decisions.log`
+  `Entropy:` line for the strategy arm; `branching_log.json` `entropy` for the SDLG
+  arm; or `trace.jsonl`) and reports `diverse-pass@k` gain (treatment − matched-k
+  vanilla) and the independent diversity metric *per stratum*. Hypothesis to test,
+  not assume: part of the gain concentrates in high-entropy strata.
+- **R5.3 — Set-valued evidence (case 1).** Identify and report instances where ≥2
+  structurally distinct patches both pass the hidden tests — direct evidence the
+  solution is a *set*.
+- **R5.4 — Off-mode recovery (case 3) — the mode-collapse signature.** Identify
+  instances where a diverse mechanism produced a *passing* fix that matched-k
+  vanilla did NOT, **while post-search entropy was LOW** (the model was confidently
+  on a wrong mode). These are the cases the entropy gate cannot predict and are the
+  direct evidence that diversity helps by escaping training bias, not only by
+  covering a set. Report SDLG vs strategy-proposal vs (where available) cross-model
+  separately here, since they address this case differently.
+- **R5.5 — Honest counter-analysis.** Show diversity does NOT help (and may waste
+  budget) on low-uncertainty/unbiased instances where greedy already sits on the
+  correct mode, and that the adaptive τ gate would have skipped branching there.
+  Guards against a "diversity always helps" overclaim and motivates the gate — while
+  acknowledging the gate's blind spot from R5.4.
+
+*Pass:* the framing is present and the analysis script (entropy stratification +
+off-mode-recovery detection) is implemented and runnable over the artifacts. The
+*executed* numbers may be a known gap pending the GPU runs — record that in
+`next_actions`; do not fabricate them.
+
+---
+
+## 6. Statistical rigor & honest scope  `[BLOCKER]`
+
+- **R6.1 — Uncertainty:** every headline number carries a confidence interval
+  (bootstrap over instances acceptable); no point estimates without spread.
+- **R6.2 — Scope claims match the data:** claims are scoped to the instance set
+  actually run (currently 10 easy SymPy; goal: full SWE-bench Lite). No
+  generalization beyond what was measured.
+- **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
+  passing branches (the `step_limit` 250→300 asymmetry must be shown not to
+  manufacture wins), and per-arm token/compute accounting reported.
+- **R6.4 — Threats to validity** enumerated and either addressed or acknowledged
+  (cherry-picked difficulty band, single repo, oracle selection, n).
+
+---
+
+## 7. Reproducibility & artifact quality  `[BLOCKER]`
+
+- **R7.1** One documented command per arm reproduces its predictions; configs are
+  checked in; the NLI/vLLM/Docker prerequisites are documented.
+- **R7.2** No silent data loss: every completed trajectory's patch is captured
+  before container teardown; predictions JSONL schema is documented and stable.
+- **R7.3** Figures/tables are regenerable from the predictions artifacts by a
+  checked-in script.
+- **R7.4** Determinism knobs (seeds where applicable, model/temperature, package
+  versions) are recorded with the results.
+
+---
+
+## 8. Internal correctness (no latent bugs that corrupt evidence)  `[BLOCKER]`
+
+- **R8.1** Write-command / branch-point detection is correct (no `echo`/submit/
+  stderr false positives) so SDLG and read-budget logic fire at the right step.
+- **R8.2** Config defaults are centralized and consistent across call sites.
+- **R8.3** Captured fallback patches are source-only (comparable to the curated
+  submit path), not raw diffs that include test edits.
+- **R8.4** `py_compile` clean; key modules import; clustering smoke checks pass
+  (greedy/connected agree on separable inputs; kernel orders identical<grouped<
+  distinct; order-independence of connected).
+- **R8.5 — Stage-level pipeline tests `[BLOCKER]`.** The pipeline must be testable
+  *part by part*, not only end-to-end (the full run needs GPU/Docker). Each stage
+  has a runnable check that uses mocks/fakes for the heavy dependencies (no vLLM,
+  no Docker, no real NLI server): (a) SEARCH relevance scoring + saturation/step
+  caps; (b) strategy proposal parsing + clustering + entropy/branch decision;
+  (c) SDLG write-point trigger fires on real writes and NOT on echo/submit/stderr;
+  (d) source-only patch capture + no-overwrite of a real submission; (e) matched-k
+  resample driver wiring (k read from metadata, per-temperature dirs, none-arm
+  selected); (f) the metric scripts (§4) on tiny synthetic predictions. Prefer a
+  `tests/` suite (pytest) the loop can run; if absent, the loop should add it. This
+  is how the loop "tests the pipeline at different parts" without launching runs.
+
+---
+
+## 9. Model diversity & ensembles — uncertainty over the model itself  `[TRACKED]`
+
+A single model's pretraining + RLHF impose systematic biases (knowledge collapse —
+`PDFs/Wright_2025_Epistemic_Diversity_Knowledge_Collapse.pdf`; reduced variety —
+`PDFs/Zhang_2025_NoveltyBench.pdf`). Within-model sampling cannot escape those
+biases; different model families have different epistemic blind spots. So model
+choice is itself an uncertainty axis.
+
+- **R9.1 — Model-swappable now `[BLOCKER]`.** No hardcoded model assumptions in
+  the pipeline; the base model is selected by config / CLI end-to-end. Verify a
+  different model id can be plugged without code edits (e.g. via
+  `model.model_name` and the vLLM endpoint), and that intent/strategy/SDLG/relevance
+  sub-calls all honor it.
+- **R9.2 — Roadmap analysis (tracked, not required for v1 unless claimed):**
+  (a) reproduce the mode-collapse finding on ≥2 distinct model families to show it
+  is not Qwen-specific (strengthens the claim and aligns with the knowledge-collapse
+  literature); (b) an *ensemble* arm that pools branches across models, measuring
+  whether cross-model coverage / diversity exceeds any single model at matched
+  budget. Both reuse the matched-budget, independent-metric machinery.
+- **R9.3** If the paper makes ANY cross-model or ensemble claim, R9.2 is promoted
+  to `[BLOCKER]` and must be run with the same rigor (matched budget, independent
+  diversity metric, CIs).
+
+---
+
+## 10. Writeup scaffolding (need not be the final paper)  `[NON-BLOCKER but tracked]`
+
+Last because it consumes everything above.
+
+- **R10.1** A `RESULTS.md` / methods+results draft that states the design choices
+  (matched-k, temperature sweep, scaffold match, independent diversity metric) and
+  the threats-to-validity section.
+- **R10.2** A results table/figure stub wired to the metric scripts.
+- **R10.3** The uncertainty framing of §0.1 (epistemic vs aleatoric, the SEARCH
+  step as epistemic-uncertainty reduction, semantic entropy as post-search
+  uncertainty, diversity for set-valued solutions) is stated explicitly as the
+  paper's conceptual spine and connected to the empirical design.
+
+---
+
+## DONE — evidence sufficiency bar
+
+The loop may STOP and declare success only when ALL of the following hold and are
+**stable across `--require-stable` consecutive iterations**:
+
+1. Every `[BLOCKER]` rubric item (sections 1, 2, 3-claimed, 4, 5, 6, 7, 8 —
+   including R8.5 stage tests — and R9.1 model-swappability) is `pass` with an
+   evidence pointer.
+2. The pipeline can, by a single documented command per arm, produce the
+   predictions needed to compute the headline metrics — i.e. the *evidence is
+   gatherable* (the loop need not execute the multi-hour GPU runs itself; it must
+   prove they are wired, correct, and that the metric scripts consume their output).
+   Stage-level tests (R8.5) pass, proving each part works in isolation.
+3. `diverse-pass@k` (R4.1), the independent diversity metric (R4.2), and the
+   uncertainty-stratification script (R5.2) are implemented and runnable over the
+   predictions schema. Executed numbers may legitimately await the GPU runs; the
+   *wiring and correctness* must be proven and any pending run listed in
+   `next_actions`.
+4. Threats to validity (R6.4) are enumerated and addressed/acknowledged, and the
+   §0.1 uncertainty framing (R10.3/R5.1) is stated as the conceptual spine.
+5. `blocking_gaps` is empty.
+
+If any BLOCKER is `fail`/`partial`, the loop must record the gap, implement the
+highest-value fix(es) this iteration, and continue.
+
+**Anti-stall:** if an iteration makes zero `changes_made` and the gold standard is
+still unmet, that is a *stuck* signal — the verdict must explain why (e.g.
+"requires a GPU run I cannot launch here") and put the concrete human action in
+`next_actions`. The wrapper treats repeated stalls as a stop condition.
+
+---
+
+## Out of scope / non-goals (do NOT do these to "pass")
+
+- Do not launch the full multi-hour SWE-bench/vLLM runs from inside the loop
+  unless explicitly enabled; wiring + smoke verification is sufficient for the
+  readiness verdict.
+- Do not fabricate, hardcode, or cherry-pick results to make a metric look good.
+- Do not weaken a BLOCKER, delete a test, or narrow the instance set to force a
+  pass. Propose spec changes openly instead.
+- Do not expand scope into new research directions not in the proposal; fix and
+  complete the claimed contribution.
+
+---
+
+## Verdict schema (the loop writes `review_loop/verdict_<NN>.json` matching this)
+
+```json
+{
+  "iteration": 0,
+  "timestamp": "ISO-8601",
+  "summary": "one paragraph",
+  "rubric": {
+    "R1_faithfulness":         {"status": "pass|partial|fail", "evidence": "path:line or cmd", "notes": ""},
+    "R2_arms_matched":         {"status": "...", "evidence": "", "notes": ""},
+    "R3_ablations":            {"status": "...", "evidence": "", "notes": ""},
+    "R4_metrics_independent":  {"status": "...", "evidence": "", "notes": ""},
+    "R5_uncertainty_analysis": {"status": "...", "evidence": "", "notes": ""},
+    "R6_statistical_rigor":    {"status": "...", "evidence": "", "notes": ""},
+    "R7_reproducibility":      {"status": "...", "evidence": "", "notes": ""},
+    "R8_internal_correctness": {"status": "...", "evidence": "", "notes": ""},
+    "R9_model_diversity":      {"status": "...", "evidence": "", "notes": ""},
+    "R10_writeup":             {"status": "...", "evidence": "", "notes": ""}
+  },
+  "issues_found": [
+    {"title": "", "severity": "blocker|major|minor", "rubric_key": "R4_metrics_independent",
+     "decision": "fix-now|defer|wontfix", "rationale": ""}
+  ],
+  "changes_made": [{"file": "", "what": "", "why": ""}],
+  "evidence_gatherable": false,
+  "gold_standard_met": false,
+  "blocking_gaps": ["concrete gap 1"],
+  "next_actions": ["concrete action (incl. human-only steps like GPU runs)"],
+  "confidence": 0.0
+}
+```

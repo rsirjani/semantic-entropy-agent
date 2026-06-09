@@ -131,7 +131,11 @@ agent:
     - You CANNOT continue working on this task after submitting.
     </CRITICAL>
     </instructions>
-  step_limit: 250
+  step_limit: 300            # Per-trajectory step cap. t0 + SDLG children inherit the
+                             # search step count (up to max_search_steps=240), so this must
+                             # exceed it by a real patch/verify budget (~60 steps) — else
+                             # they trip the run-loop cap before patching. Lazy strategy
+                             # trajectories reset to step 0 and use the full budget.
   cost_limit: 0.
 
 model:
@@ -192,26 +196,52 @@ environment:
     TQDM_DISABLE: "1"
 
 branching:
-  # Strategy proposal settings (replaces SDLG/temperature)
-  n_strategies: 5             # How many strategies to propose — more = wider exploration
+  # === Diversity arm (single switch — the arms are mutually exclusive) ===
+  # "strategy_proposal": Phase 2 prompts the LLM for K strategies, clusters
+  #     them, and branches one trajectory per cluster. SDLG is OFF.
+  # "sdlg": single trajectory after search; SDLG branches at the first write
+  #     command via DeBERTa token attribution. No strategy proposal.
+  # "none": single vanilla trajectory, no proposal, no SDLG. Used by the
+  #     matched-k resample baseline (scripts/run_resample_baseline.py), which
+  #     runs this arm k times at sample_temperature to measure mode collapse
+  #     against the branching arms at equal trajectory budget.
+  # sdlg_enabled is DERIVED from this in the orchestrator — do NOT set it
+  # independently (that is the stacking we removed). Run one arm per experiment.
   diversity_method: "strategy_proposal"
+  n_strategies: 5             # [strategy_proposal arm] strategies to propose — more = wider exploration
+  sample_temperature: 1.0     # Sampling temp shared by the proposer AND the vanilla
+                              # resample baseline, so the arms differ ONLY in the
+                              # branching mechanism. The matched-k baseline sweeps
+                              # this (e.g. 0.2/0.7/1.0) to show vanilla collapses.
 
   # Clustering settings
   entailment_threshold: 0.7   # For bidirectional entailment (higher = more clusters; raised from 0.5 to prevent over-merging)
-  entropy_threshold: 0.0      # Always branch (we want all unique strategies)
+  entropy_threshold: 0.0      # tau. DEFAULT 0.0 = always branch — intentional for the
+                              # MAIN run: we want the full diverse set to measure
+                              # coverage/diversity and to stratify instances by entropy
+                              # post-hoc. The adaptive gate (branch iff entropy > tau) is
+                              # a SEPARATE efficiency claim — sweep tau via --tau for the
+                              # R3.3 ablation, don't change this default. (Kernel entropy
+                              # is on a different scale; recalibrate tau per strategy.)
 
   max_trajectories: 30        # Cap on total trajectories (strategies × SDLG alternatives)
-  max_search_steps: 30        # Hard cap on search steps (fallback)
+  max_search_steps: 240       # Hard cap on search steps (fallback) — set just below the mini-swe-agent step_limit (250)
   min_search_steps: 8         # Minimum search steps before saturation can trigger
   relevance_threshold: 0.5    # Relevance scoring threshold (context-conditioned entailment per Kuhn et al.)
   relevance_use_nli: false    # NLI doesn't work here — entailment ≠ topical relevance (see experiments)
   low_relevance_streak: 3     # Transition to proposal after N consecutive low-relevance steps
   patch_read_budget: 5        # Max read-only steps in PATCH before nudging toward write
 
-  # SDLG settings (diverse implementations within each strategy)
-  sdlg_enabled: true           # SDLG enabled — DeBERTa runs in separate NLI server process
-  sdlg_n_alternatives: 5      # Number of SDLG alternatives per strategy (including greedy)
+  # === SDLG settings ([sdlg arm] only; ignored when diversity_method=strategy_proposal) ===
+  # NOTE: sdlg_enabled is DERIVED from diversity_method in the orchestrator and
+  # is intentionally NOT a key here, so a stale config can never stack arms.
+  sdlg_n_alternatives: 5      # SDLG alternatives generated at the branch point (including greedy)
   sdlg_top_k: 20              # Top-K substitution candidates to evaluate per token position
+  sdlg_diversify_code: false  # Faithful SDLG (Aichberger 2025) substitutes only the REASONING —
+                              # R1.1/CLAUDE.md require "substitutions apply to reasoning, NOT
+                              # action tokens" (NLI gradients are near-random on bash tokens).
+                              # Setting true ALSO substitutes inside the bash command; treat that
+                              # as a separate, explicitly-claimed ablation, not the default arm.
 
 nli:
   server_url: "http://localhost:8100"  # DeBERTa NLI server (separate process)

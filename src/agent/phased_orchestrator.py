@@ -30,10 +30,12 @@ from minisweagent.environments.docker import DockerEnvironment
 from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
 
 from src.agent.branching_agent import BranchingAgent
+from src.agent.branching_defaults import VALID_DIVERSITY_METHODS, cfg
 from src.agent.phases import (
     Phase, SEARCH_PROMPT, PATCH_PROMPT, PATCH_PROMPT_WITH_STRATEGY,
     PATCH_FORCE_WRITE_MSG, VERIFY_PROMPT,
-    detect_phase_transition, is_command_allowed,
+    detect_phase_transition, is_command_allowed, is_write_command,
+    should_end_search,
 )
 from src.agent.trajectory import Trajectory, TrajectoryManager
 from src.diversity.clustering import SemanticClusterer
@@ -71,7 +73,9 @@ class PhasedOrchestrator:
         self.nli = nli_model
         self.clusterer = SemanticClusterer(
             nli=nli_model,
-            entailment_threshold=branching_config.get("entailment_threshold", 0.3),
+            entailment_threshold=cfg(branching_config, "entailment_threshold"),
+            strategy=cfg(branching_config, "clustering_strategy"),
+            kernel_t=cfg(branching_config, "kernel_t"),
         )
         self.intent_extractor = IntentExtractor(
             model_name=model_config.get("model_name", "openai/qwen3-coder"),
@@ -80,33 +84,65 @@ class PhasedOrchestrator:
         )
         self.relevance_scorer = RelevanceScorer(
             nli=nli_model,
-            threshold=branching_config.get("relevance_threshold", 0.4),
+            threshold=cfg(branching_config, "relevance_threshold"),
             model_name=model_config.get("model_name", "openai/qwen3-coder"),
             model_kwargs=model_config.get("model_kwargs", {}),
-            use_nli=branching_config.get("relevance_use_nli", False),
+            use_nli=cfg(branching_config, "relevance_use_nli"),
         )
+
+        # Shared sampling temperature (proposer + vanilla resample baseline use
+        # the SAME value, so the arms differ only in the branching mechanism).
+        self.sample_temperature = cfg(branching_config, "sample_temperature")
 
         # Strategy proposer
         self.proposer = StrategyProposer(
             model_name=model_config.get("model_name", "openai/qwen3-coder"),
             model_kwargs=model_config.get("model_kwargs", {}),
-            n_strategies=branching_config.get("n_strategies", 5),
+            n_strategies=cfg(branching_config, "n_strategies"),
+            temperature=self.sample_temperature,
         )
 
         # SDLG generator for diverse implementations within each strategy
         self.sdlg = SDLGGenerator(
             nli_model=nli_model,
-            n_candidates=branching_config.get("sdlg_n_alternatives", 3),
-            top_k_substitutes=branching_config.get("sdlg_top_k", 20),
+            n_candidates=cfg(branching_config, "sdlg_n_alternatives"),
+            top_k_substitutes=cfg(branching_config, "sdlg_top_k"),
+            # Reasoning-only by default (R1.1); code-level substitution is an
+            # explicit, ablatable opt-in.
+            diversify_code=cfg(branching_config, "sdlg_diversify_code"),
         )
 
         # Parameters
-        self.max_trajectories = branching_config.get("max_trajectories", 10)
+        self.max_trajectories = cfg(branching_config, "max_trajectories")
         self.max_steps = agent_config.get("step_limit", 250)
-        self.max_search_steps = branching_config.get("max_search_steps", 30)
-        self.min_search_steps = branching_config.get("min_search_steps", 5)
-        self.patch_read_budget = branching_config.get("patch_read_budget", 3)
-        self.sdlg_enabled = branching_config.get("sdlg_enabled", True)
+        self.max_search_steps = cfg(branching_config, "max_search_steps")
+        self.min_search_steps = cfg(branching_config, "min_search_steps")
+        self.patch_read_budget = cfg(branching_config, "patch_read_budget")
+
+        # Diversity method is a SINGLE switch — the arms are mutually exclusive
+        # so results can be attributed to exactly one generator:
+        #   "strategy_proposal": Phase 2 proposes K strategies and branches over
+        #       their clusters. SDLG is OFF.
+        #   "sdlg": single trajectory after search; SDLG branches at the first
+        #       write command. No strategy proposal.
+        #   "none": single trajectory, no proposal, no SDLG. This is the vanilla
+        #       agent used by the matched-k resample baseline — run k times at
+        #       sample_temperature to measure mode collapse against branching.
+        # sdlg_enabled is DERIVED from this, never set independently, so a run
+        # can never stack both generators.
+        self.diversity_method = cfg(branching_config, "diversity_method")
+        if self.diversity_method not in VALID_DIVERSITY_METHODS:
+            raise ValueError(
+                f"diversity_method must be one of {VALID_DIVERSITY_METHODS}, "
+                f"got {self.diversity_method!r}"
+            )
+        self.use_strategy_proposal = self.diversity_method == "strategy_proposal"
+        self.sdlg_enabled = self.diversity_method == "sdlg"
+        logger.info(
+            f"Diversity arm: {self.diversity_method} "
+            f"(strategy_proposal={self.use_strategy_proposal}, "
+            f"sdlg={self.sdlg_enabled}, sample_temperature={self.sample_temperature})"
+        )
 
         # Trajectory manager
         self.manager = TrajectoryManager(
@@ -141,8 +177,8 @@ class PhasedOrchestrator:
         # Search phase: track relevance scores for saturation detection
         self.search_relevance_scores: list[dict] = []
         self.consecutive_low_relevance = 0
-        self.low_relevance_streak_threshold = branching_config.get(
-            "low_relevance_streak", 3
+        self.low_relevance_streak_threshold = cfg(
+            branching_config, "low_relevance_streak"
         )
 
         # Logging
@@ -179,9 +215,18 @@ class PhasedOrchestrator:
                     logger.error(f"Error in search step {root.step}: {e}", exc_info=True)
                     break
 
-                # Check for search saturation: N consecutive low-relevance steps
-                # But only after minimum search steps to let the agent find code first
-                if root.step >= self.min_search_steps and self.consecutive_low_relevance >= self.low_relevance_streak_threshold:
+                # Saturation (normal exit) is checked before the hard cap
+                # (fallback) by should_end_search. The cap prevents infinite
+                # loops when the agent repeatedly attempts blocked commands,
+                # which don't get relevance-scored and so never saturate.
+                end_reason = should_end_search(
+                    step=root.step,
+                    consecutive_low_relevance=self.consecutive_low_relevance,
+                    min_search_steps=self.min_search_steps,
+                    low_relevance_streak=self.low_relevance_streak_threshold,
+                    max_search_steps=self.max_search_steps,
+                )
+                if end_reason == "saturated":
                     self.tracer.log(
                         "phase1.search_saturated",
                         scores={"consecutive_low": self.consecutive_low_relevance,
@@ -192,11 +237,7 @@ class PhasedOrchestrator:
                     )
                     self.trajectory_phases["t0"] = Phase.PATCH
                     break
-
-                # Hard cap on search steps — prevents infinite loops when the
-                # agent repeatedly attempts blocked commands (which don't get
-                # relevance-scored and thus never trigger saturation)
-                if root.step >= self.max_search_steps:
+                if end_reason == "step_limit":
                     self.tracer.log(
                         "phase1.search_step_limit",
                         scores={"total_search_steps": root.step,
@@ -211,9 +252,19 @@ class PhasedOrchestrator:
             # === Phase 2: STRATEGY PROPOSAL (no containers created yet) ===
             # Build search report BEFORE pruning so relevant messages are visible.
             unique_strategies = []
-            if root.status == "active":
+            if root.status == "active" and self.use_strategy_proposal:
                 logger.info(f"=== STRATEGY PROPOSAL ===")
                 unique_strategies = self._propose_strategies(root)
+            elif root.status == "active" and self.sdlg_enabled:
+                logger.info(
+                    "=== SDLG ARM: single trajectory, no strategy proposal "
+                    "(SDLG branches at first write) ==="
+                )
+            elif root.status == "active":
+                logger.info(
+                    "=== NONE ARM: single vanilla trajectory, no proposal, no "
+                    "SDLG (matched-k resample baseline) ==="
+                )
 
             # === Prune low-relevance steps from root's context ===
             if root.status == "active":
@@ -288,6 +339,11 @@ class PhasedOrchestrator:
                         traj.status = "completed"
                         break
 
+                # Capture any uncommitted diff BEFORE destroying the container —
+                # the step-limit/format-error completion paths don't populate
+                # traj.patch, and cleanup() makes the diff unrecoverable.
+                self._capture_patch_if_missing(traj)
+
                 # Save results and DESTROY container before next strategy
                 self.manager.save_all()
                 try:
@@ -333,6 +389,7 @@ class PhasedOrchestrator:
                             sdlg_traj.status = "completed"
                             break
 
+                    self._capture_patch_if_missing(sdlg_traj)
                     self.manager.save_all()
                     try:
                         sdlg_traj.cleanup()
@@ -617,12 +674,20 @@ class PhasedOrchestrator:
         if not strategies:
             return []
 
-        # 3. Cluster strategies — pairwise NLI + bidirectional entailment
+        # 3. Cluster strategies — pairwise NLI + bidirectional entailment.
+        # Use the SAME context and threshold as the clusterer / the SDLG path so
+        # the logged pairwise decisions cannot desync from the actual clustering
+        # (meaning is context-conditioned per Kuhn et al. Algorithm 1).
+        cluster_context = self.problem_statement[:500]
+        entail_thr = self.clusterer.threshold
+        tau = self.branching_config.get("entropy_threshold", 0.0)
         for i in range(len(strategies)):
             for j in range(i + 1, len(strategies)):
-                fwd = self.nli.classify(strategies[i], strategies[j])
-                bwd = self.nli.classify(strategies[j], strategies[i])
-                same = fwd["entailment"] > 0.7 and bwd["entailment"] > 0.7
+                a = f"{cluster_context} {strategies[i]}"
+                b = f"{cluster_context} {strategies[j]}"
+                fwd = self.nli.classify(a, b)
+                bwd = self.nli.classify(b, a)
+                same = fwd["entailment"] > entail_thr and bwd["entailment"] > entail_thr
                 self.tracer.log(
                     "phase2.pairwise_nli",
                     input={"strategy_a_idx": i, "strategy_a": strategies[i][:300],
@@ -633,15 +698,15 @@ class PhasedOrchestrator:
                             "backward_entailment": round(bwd["entailment"], 4),
                             "backward_neutral": round(bwd["neutral"], 4),
                             "backward_contradiction": round(bwd["contradiction"], 4),
-                            "entailment_threshold": 0.7},
+                            "entailment_threshold": entail_thr},
                     decision="SAME_CLUSTER" if same else "DIFFERENT_CLUSTERS",
                     phase="STRATEGY_PROPOSAL",
                 )
 
         analysis = self.clusterer.analyze(
             strategies,
-            tau=0.0,
-            context="",
+            tau=tau,
+            context=cluster_context,
         )
         clusters = analysis["clusters"]
         entropy = analysis["entropy"]
@@ -660,8 +725,8 @@ class PhasedOrchestrator:
                     "cluster_members": [list(c.indices) for c in clusters],
                     "unique_strategies": unique_strategies},
             scores={"semantic_entropy": round(entropy, 4),
-                    "entropy_threshold": 0.0},
-            decision="BRANCH_ALL" if entropy > 0.0 else "SINGLE_STRATEGY",
+                    "entropy_threshold": tau},
+            decision="BRANCH_ALL" if entropy > tau else "SINGLE_STRATEGY",
             phase="STRATEGY_PROPOSAL",
         )
 
@@ -850,14 +915,14 @@ class PhasedOrchestrator:
         self._check_finished(traj)
 
     def _is_write_command(self, cmd: str) -> bool:
-        """Check if a command modifies files (triggers SDLG diversification)."""
-        write_patterns = [
-            "sed -i", "sed -e", "cat <<", "cat >", "cat>>",
-            "patch ", "patch -p", "tee ", "mv ", "cp ",
-            "echo ", "printf ", ">> ", "> ",
-        ]
-        cmd_lower = cmd.strip().lower()
-        return any(p in cmd_lower for p in write_patterns)
+        """Check if a command modifies files (triggers SDLG diversification).
+
+        Delegates to the single hardened detector in phases.is_write_command so
+        the SDLG trigger and the read-budget tracker agree, and so the submit
+        command / bare echo / stderr redirects are not misclassified as writes
+        (which previously fired SDLG at the wrong point in the sdlg arm).
+        """
+        return is_write_command(cmd)
 
     def _apply_sdlg(
         self, traj: Trajectory, message: dict, greedy_content: str,
@@ -1224,16 +1289,13 @@ class PhasedOrchestrator:
                 trajectory_id=traj.trajectory_id, step=traj.step,
             )
         elif isinstance(exception, LimitsExceeded):
-            try:
-                result = traj.env.execute({"command": "cd /testbed && git diff --no-color"})
-                traj.patch = result.get("output", "").strip()
-            except Exception:
-                pass
+            # The working-tree diff is captured uniformly at container teardown
+            # by _capture_patch_if_missing (the single source-filtered chokepoint
+            # for all non-Submitted paths), so we don't grab it here — that
+            # avoids a second, divergent git-diff path.
             self.tracer.log(
                 "trajectory.finished",
-                output={"status": "limits_exceeded",
-                        "patch_length": len(traj.patch) if traj.patch else 0,
-                        "patch": traj.patch or ""},
+                output={"status": "limits_exceeded"},
                 trajectory_id=traj.trajectory_id, step=traj.step,
             )
 
@@ -1242,6 +1304,87 @@ class PhasedOrchestrator:
             traj.status = "completed"
             traj.submitted = traj.agent.get_submission() != ""
             traj.patch = traj.agent.get_submission()
+
+    @staticmethod
+    def _is_test_path(path: str) -> bool:
+        """True if a repo path is a test/conftest file (excluded from patches)."""
+        p = path.strip()
+        base = p.rsplit("/", 1)[-1]
+        return (
+            "/tests/" in p or "/test/" in p
+            or base.startswith("test_") or base.endswith("_test.py")
+            or base == "conftest.py"
+        )
+
+    @classmethod
+    def _filter_diff_to_source(cls, diff_text: str) -> str:
+        """Drop test-file sections from a unified git diff.
+
+        The submit path produces a CURATED `git diff -- <source files>`, but the
+        fallback capture runs a blanket `git diff`, which can include edits to
+        tracked test files. Filtering those out keeps fallback-captured patches
+        comparable to submitted ones (SWE-bench re-applies the gold test_patch
+        regardless, so test edits in a prediction are noise at best).
+        """
+        if not diff_text:
+            return diff_text
+        lines = diff_text.splitlines(keepends=True)
+        sections: list[tuple[str, list[str]]] = []
+        current_path = ""
+        buf: list[str] = []
+        for line in lines:
+            if line.startswith("diff --git "):
+                if buf:
+                    sections.append((current_path, buf))
+                buf = [line]
+                # "diff --git a/<path> b/<path>" → take the b/ path
+                parts = line.split()
+                current_path = parts[3][2:] if len(parts) >= 4 else ""
+            else:
+                buf.append(line)
+        if buf:
+            sections.append((current_path, buf))
+        kept = [
+            "".join(body) for path, body in sections
+            if not (path and cls._is_test_path(path))
+        ]
+        return "".join(kept).strip()
+
+    def _git_diff_source_only(self, traj: Trajectory) -> str:
+        """Run `git diff` in the live container and strip test-file sections."""
+        result = traj.env.execute({"command": "cd /testbed && git diff --no-color"})
+        return self._filter_diff_to_source(result.get("output", "").strip())
+
+    def _capture_patch_if_missing(self, traj: Trajectory) -> None:
+        """Capture the working-tree diff before a container is destroyed.
+
+        The run loop can mark a trajectory 'completed' via the step-limit cap,
+        and a trajectory can also stop on a format error or write a summary
+        instead of the exact submit command — none of which raise Submitted /
+        LimitsExceeded, the two paths that normally populate traj.patch. In
+        those cases the agent may still have made real edits. Grab the git diff
+        now, while the container is alive, so the branch isn't silently dropped
+        from diverse-pass@1. No-op if a patch was already captured. The diff is
+        filtered to source files to match the curated submit path.
+        """
+        if traj.patch:
+            return
+        try:
+            patch = self._git_diff_source_only(traj)
+        except Exception as e:
+            logger.warning(f"Failed to capture fallback patch for {traj.trajectory_id}: {e}")
+            return
+        if patch:
+            traj.patch = patch
+            self.tracer.log(
+                "trajectory.patch_captured_fallback",
+                output={"patch_length": len(patch), "patch": patch},
+                trajectory_id=traj.trajectory_id, step=traj.step,
+            )
+            logger.info(
+                f"Captured fallback patch for {traj.trajectory_id} "
+                f"({len(patch)}ch) before cleanup"
+            )
 
     def _log_step(self, traj: Trajectory, **kwargs):
         entry = {

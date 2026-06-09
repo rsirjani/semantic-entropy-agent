@@ -54,6 +54,8 @@ class BranchingOrchestrator:
         self.clusterer = SemanticClusterer(
             nli=nli_model,
             entailment_threshold=branching_config.get("entailment_threshold", 0.5),
+            strategy=branching_config.get("clustering_strategy", "greedy"),
+            kernel_t=branching_config.get("kernel_t", 1.0),
         )
         self.intent_extractor = IntentExtractor(
             model_name=model_config.get("model_name", "openai/qwen3-coder"),
