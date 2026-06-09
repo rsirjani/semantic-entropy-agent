@@ -680,7 +680,7 @@ class PhasedOrchestrator:
         # (meaning is context-conditioned per Kuhn et al. Algorithm 1).
         cluster_context = self.problem_statement[:500]
         entail_thr = self.clusterer.threshold
-        tau = self.branching_config.get("entropy_threshold", 0.0)
+        tau = cfg(self.branching_config, "entropy_threshold")
         for i in range(len(strategies)):
             for j in range(i + 1, len(strategies)):
                 a = f"{cluster_context} {strategies[i]}"
@@ -1011,7 +1011,7 @@ class PhasedOrchestrator:
         )
 
         # Step 3: Cluster via bidirectional entailment + compute entropy
-        entropy_threshold = self.branching_config.get("entropy_threshold", 0.0)
+        entropy_threshold = cfg(self.branching_config, "entropy_threshold")
         analysis = self.clusterer.analyze(
             intents,
             tau=entropy_threshold,

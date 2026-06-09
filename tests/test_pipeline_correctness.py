@@ -48,6 +48,25 @@ def test_source_only_diff_filter():
     assert "core/mul.py" in out and "test_mul.py" not in out
 
 
+def test_vanilla_none_arm_samples_at_temperature():
+    """R2.4: the 'none' arm must decode at sample_temperature>0, not greedy."""
+    import run_branching as rb
+    base = {"model_kwargs": {"temperature": 0.0, "api_base": "x"}}
+
+    # 'none' arm -> base agent temperature overridden to sample_temperature.
+    out = rb.vanilla_samples_at_temperature(
+        base, {"diversity_method": "none", "sample_temperature": 0.7})
+    assert out["model_kwargs"]["temperature"] == 0.7
+    assert base["model_kwargs"]["temperature"] == 0.0  # caller dict untouched
+
+    # Treatment arms keep the base agent greedy (diversity from proposer/SDLG).
+    for arm in ("strategy_proposal", "sdlg"):
+        out = rb.vanilla_samples_at_temperature(
+            base, {"diversity_method": arm, "sample_temperature": 0.7})
+        assert out is base  # unchanged, same object
+        assert out["model_kwargs"]["temperature"] == 0.0
+
+
 def test_matched_k_discovery(tmp_path):
     import run_resample_baseline as rb
     for iid, k in [("sympy__sympy-1", 5), ("sympy__sympy-2", 9)]:

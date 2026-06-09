@@ -1,7 +1,7 @@
 # Results & Methods Draft — Semantic-Entropy-Gated Diverse Agentic Code Generation
 
 > **Status.** This is the publication scaffolding (rubric R10). The pipeline is
-> wired and unit-/stage-tested (`tests/`, 33 passing); the **executed headline
+> wired and unit-/stage-tested (`tests/`, run `python -m pytest tests/ -q`); the **executed headline
 > numbers await the GPU/vLLM + SWE-bench runs**, which cannot be launched from the
 > review loop. Every results cell below is therefore a **command + a pending
 > placeholder**, never a fabricated value. When a run completes, `scripts/compute_metrics.py`

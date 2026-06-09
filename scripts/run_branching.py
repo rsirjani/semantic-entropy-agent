@@ -1,5 +1,6 @@
 """Run semantic branching agent on SWE-bench instances."""
 
+import copy
 import json
 import logging
 import os
@@ -95,6 +96,25 @@ def find_eval_image(instance_id: str) -> str:
     return candidate
 
 
+def vanilla_samples_at_temperature(model_config: dict, branching_config: dict) -> dict:
+    """Make the vanilla 'none' arm decode at sample_temperature > 0 (R2.4).
+
+    The 'none' arm draws its diversity ENTIRELY from base-agent sampling (no
+    proposer, no SDLG), so a temp-0 'none' run is the deterministic strawman the
+    rubric forbids. The treatment arms keep the base agent greedy and get
+    diversity from the proposer/SDLG, so the override applies ONLY to 'none'
+    (mirroring run_resample_baseline.run_one_resample). Returns model_config
+    unchanged for any other arm, or a deep-copied config with the base-agent
+    temperature set for 'none' (never mutating the caller's dict).
+    """
+    if branching_config.get("diversity_method") != "none":
+        return model_config
+    mc = copy.deepcopy(model_config)
+    mc.setdefault("model_kwargs", {})["temperature"] = \
+        branching_config.get("sample_temperature", 1.0)
+    return mc
+
+
 def build_env_config(config: dict, instance_id: str) -> dict:
     """Build DockerEnvironment config for a specific instance."""
     env_config = dict(config.get("environment", {}))
@@ -127,6 +147,10 @@ def run_single_instance(
     env_config = build_env_config(config, instance_id)
     branching_config = dict(config["branching"])
     branching_config["results_dir"] = results_dir
+
+    # Honest vanilla baseline (R2.4): the 'none' arm decodes at sample_temperature,
+    # so `--diversity-method none --temperature T` here matches run_resample_baseline.
+    model_config = vanilla_samples_at_temperature(model_config, branching_config)
 
     start_time = time.time()
 
