@@ -166,7 +166,21 @@ python scripts/compute_metrics.py \
     --compare-predictions results/resample_t0.7/predictions_all_trajectories.jsonl \
     --compare-eval results/resample_t0.7 \
     --out results/metrics_strategy_vs_vanilla_t0.7.json
+# Budget-fairness + per-arm token/compute accounting (R6.3), per arm:
+python scripts/budget_audit.py --results-dir results/strategy_t0.7 \
+    --eval results/strategy_t0.7 --reference-cap 250 \
+    --out results/budget_audit_strategy_t0.7.json
 ```
+
+Per-arm token totals are summed from each trajectory's stored litellm response
+(`extra.response.usage` in the `.traj.json` transcripts) — no run-loop
+instrumentation is needed, so `budget_audit.py` reports `tokens_arm_total`,
+`tokens_per_trajectory`, and `tokens_passing_trajectories` directly from the
+artifacts. On the existing `results/branching` run this already yields ~12.9 M total
+tokens over 53 trajectories with **0** passing branches above the 250-step baseline
+cap (max passing = 164 steps), so the step-limit asymmetry did not manufacture wins.
+Cost in $ is omitted only because the local vLLM model is unregistered for litellm
+cost calculation; tokens and steps are the compute proxies.
 
 | Metric (n=10 easy SymPy) | Matched-k vanilla | Strategy-proposal | SDLG |
 |---|---|---|---|

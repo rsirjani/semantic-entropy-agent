@@ -22,6 +22,24 @@ def _write_eval(d, iid, resolved_by_tid):
                                     for t, r in resolved_by_tid.items()]}, f)
 
 
+def _write_traj(d, iid, tid, usages):
+    """usages: list of (prompt, completion) per assistant call (None -> injected, no usage)."""
+    inst = os.path.join(d, iid)
+    os.makedirs(inst, exist_ok=True)
+    messages = []
+    for u in usages:
+        if u is None:
+            messages.append({"role": "assistant", "content": "x",
+                             "extra": {"injected": True}})
+        else:
+            pt, ct = u
+            messages.append({"role": "assistant", "content": "x", "extra": {"response": {
+                "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                          "total_tokens": pt + ct}}}})
+    with open(os.path.join(inst, f"trajectory_{tid}.traj.json"), "w", encoding="utf-8") as f:
+        json.dump({"messages": messages, "trajectory_format": "v1"}, f)
+
+
 def test_budget_audit_flags_passing_over_cap(tmp_path):
     d = str(tmp_path)
     _write_metadata(d, "i1", [
@@ -48,6 +66,32 @@ def test_budget_audit_clean_when_under_cap(tmp_path):
     _write_eval(d, "i1", {"t0": True})
     rep = ba.audit(d, d, reference_cap=250)
     assert rep["passing_branches_over_reference_cap"] == []
+
+
+def test_budget_audit_sums_tokens_from_transcripts(tmp_path):
+    d = str(tmp_path)
+    _write_metadata(d, "i1", [
+        {"trajectory_id": "t0", "patch": "x", "submitted": True, "steps": 40},
+        {"trajectory_id": "t1", "patch": "y", "submitted": True, "steps": 50},
+        {"trajectory_id": "primary", "patch": "x", "submitted": True, "steps": 40},  # ignored
+    ], total_steps=90)
+    _write_eval(d, "i1", {"t0": True, "t1": False, "primary": True})
+    # t0: two real calls (100+10, 200+20) + one injected (no usage) -> 330 total tokens
+    _write_traj(d, "i1", "t0", [(100, 10), (200, 20), None])
+    # t1: one real call (50+5) -> 55 total tokens
+    _write_traj(d, "i1", "t1", [(50, 5)])
+    _write_traj(d, "i1", "primary", [(999, 999)])  # must be excluded
+    rep = ba.audit(d, d, reference_cap=250)
+    tok = rep["tokens_arm_total"]
+    assert tok["prompt_tokens"] == 350 and tok["completion_tokens"] == 35
+    assert tok["total_tokens"] == 385
+    assert tok["n_trajectories_with_tokens"] == 2  # primary excluded
+    # per-trajectory distribution: t0=330, t1=55
+    assert rep["tokens_per_trajectory"]["n"] == 2
+    assert rep["tokens_per_trajectory"]["max"] == 330.0
+    # only t0 passes -> passing token dist has n=1, value 330
+    assert rep["tokens_passing_trajectories"]["n"] == 1
+    assert rep["tokens_passing_trajectories"]["max"] == 330.0
 
 
 def test_make_figures_renders_pngs(tmp_path):

@@ -1,8 +1,8 @@
 r"""Budget-fairness audit (rubric R6.3).
 
-Per-trajectory step distributions and per-arm compute accounting, computed purely
-from the artifacts a run leaves behind (no GPU/Docker). The specific fairness
-concern (GOLD_STANDARD R6.3, VALIDATION_BRIEF change 3) is the step-limit
+Per-trajectory step distributions AND per-arm token/compute accounting, computed
+purely from the artifacts a run leaves behind (no GPU/Docker). The specific
+fairness concern (GOLD_STANDARD R6.3, VALIDATION_BRIEF change 3) is the step-limit
 asymmetry: lazy strategy trajectories reset to step 0 and may use up to step_limit
 (300) patch steps, vs the matched-k baseline's 250 total. This script SHOWS whether
 passing branches actually exploited that headroom or submitted far earlier.
@@ -10,10 +10,20 @@ passing branches actually exploited that headroom or submitted far earlier.
 Per arm it reads, for each instance:
   - <results_dir>/<iid>/metadata.json   (patches[].steps, patches[].trajectory_id,
                                           total_steps, elapsed_seconds)
+  - <results_dir>/<iid>/trajectory_*.traj.json  (per-message token usage from the
+                                          litellm response: extra.response.usage)
   - <results_dir>/trajectory_eval_<iid>.json  (per-trajectory `resolved`)
 joins steps to resolved by trajectory_id (NOT by index), and reports the step
 distribution overall and FOR PASSING branches, plus how many passing branches
 exceeded a reference cap (default 250 = the baseline's total budget).
+
+Token accounting (R6.3 "per-arm token/compute accounting reported"): the
+mini-swe-agent litellm model already stores the full provider response on every
+assistant message (`extra.response.usage` with prompt/completion/total tokens), so
+the per-arm token total is recoverable from the saved `.traj.json` transcripts with
+NO change to the run loop. We sum tokens per trajectory and per arm; cost is left
+out only because the local vLLM model is not registered for litellm cost
+calculation (steps + tokens are the compute proxies).
 
 Usage:
   python scripts/budget_audit.py --results-dir results/strategy_t0.7 \
@@ -54,6 +64,62 @@ def _resolved_by_tid(eval_path: str) -> dict[str, dict[str, bool]]:
     return out
 
 
+def _tid_from_traj_path(path: str) -> str:
+    """`.../trajectory_t0_strategy_1.traj.json` -> `t0_strategy_1`."""
+    base = os.path.basename(path)
+    if base.endswith(".traj.json"):
+        base = base[: -len(".traj.json")]
+    if base.startswith("trajectory_"):
+        base = base[len("trajectory_"):]
+    return base
+
+
+def _traj_tokens(traj_path: str) -> dict:
+    """Sum prompt/completion/total tokens over a trajectory transcript.
+
+    Tokens live on each assistant message at extra.response.usage (the full
+    litellm response dump). Injected/branched responses carry no usage and are
+    skipped, so we count only real model calls. Returns zeros if the transcript is
+    unreadable or carries no usage (older runs).
+    """
+    prompt = completion = total = 0
+    n_calls_with_usage = 0
+    try:
+        with open(traj_path, "r", encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception:
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                "n_calls_with_usage": 0}
+    for m in (d.get("messages", []) if isinstance(d, dict) else []):
+        usage = (m.get("extra", {}) or {}).get("response", {})
+        usage = (usage or {}).get("usage") if isinstance(usage, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        pt = usage.get("prompt_tokens") or 0
+        ct = usage.get("completion_tokens") or 0
+        tt = usage.get("total_tokens")
+        if tt is None:
+            tt = pt + ct
+        prompt += int(pt)
+        completion += int(ct)
+        total += int(tt)
+        n_calls_with_usage += 1
+    return {"prompt_tokens": prompt, "completion_tokens": completion,
+            "total_tokens": total, "n_calls_with_usage": n_calls_with_usage}
+
+
+def _tokens_by_tid(results_dir: str) -> dict[str, dict[str, dict]]:
+    """{iid: {tid: token_dict}} over every trajectory transcript in the arm."""
+    out: dict[str, dict[str, dict]] = {}
+    for traj in sorted(glob.glob(os.path.join(results_dir, "*", "trajectory_*.traj.json"))):
+        iid = os.path.basename(os.path.dirname(traj))
+        tid = _tid_from_traj_path(traj)
+        if tid == "primary":  # best-of duplicate, not an independent call set
+            continue
+        out.setdefault(iid, {})[tid] = _traj_tokens(traj)
+    return out
+
+
 def _dist(values: list[float]) -> dict:
     if not values:
         return {"n": 0, "min": None, "median": None, "mean": None, "max": None}
@@ -64,11 +130,16 @@ def _dist(values: list[float]) -> dict:
 
 def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
     resolved = _resolved_by_tid(eval_path)
+    tokens = _tokens_by_tid(results_dir)
     all_steps: list[float] = []
     passing_steps: list[float] = []
     total_steps_per_instance: list[float] = []
     elapsed_per_instance: list[float] = []
     over_cap_passing: list[dict] = []
+    traj_total_tokens: list[float] = []
+    passing_total_tokens: list[float] = []
+    arm_prompt_tokens = arm_completion_tokens = arm_total_tokens = 0
+    n_traj_with_tokens = 0
     n_instances = 0
 
     for meta in sorted(glob.glob(os.path.join(results_dir, "*", "metadata.json"))):
@@ -94,8 +165,17 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
             if steps is None or tid == "primary":
                 continue
             all_steps.append(float(steps))
+            tok = tokens.get(iid, {}).get(tid)
+            if tok and tok.get("n_calls_with_usage", 0) > 0:
+                arm_prompt_tokens += tok["prompt_tokens"]
+                arm_completion_tokens += tok["completion_tokens"]
+                arm_total_tokens += tok["total_tokens"]
+                traj_total_tokens.append(float(tok["total_tokens"]))
+                n_traj_with_tokens += 1
             if res.get(tid):
                 passing_steps.append(float(steps))
+                if tok and tok.get("n_calls_with_usage", 0) > 0:
+                    passing_total_tokens.append(float(tok["total_tokens"]))
                 if steps > reference_cap:
                     over_cap_passing.append({"instance_id": iid, "trajectory_id": tid,
                                              "steps": int(steps)})
@@ -109,11 +189,21 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
         "total_steps_per_instance": _dist(total_steps_per_instance),
         "elapsed_seconds_per_instance": _dist(elapsed_per_instance),
         "passing_branches_over_reference_cap": over_cap_passing,
+        "tokens_arm_total": {
+            "prompt_tokens": arm_prompt_tokens,
+            "completion_tokens": arm_completion_tokens,
+            "total_tokens": arm_total_tokens,
+            "n_trajectories_with_tokens": n_traj_with_tokens,
+        },
+        "tokens_per_trajectory": _dist(traj_total_tokens),
+        "tokens_passing_trajectories": _dist(passing_total_tokens),
         "fairness_note": (
             "If passing_branches_over_reference_cap is empty, no passing branch used "
             "more than the baseline's total step budget — the step_limit asymmetry did "
-            "NOT manufacture wins. Per-token accounting requires token logging, which "
-            "the current artifacts do not record (steps are the available compute proxy)."
+            "NOT manufacture wins. tokens_arm_total is the per-arm token compute "
+            "accounting (summed from each trajectory's litellm response usage); compare "
+            "it across arms at matched k. Cost in $ is omitted only because the local "
+            "vLLM model is not registered for litellm cost calculation."
         ),
     }
 
@@ -131,6 +221,8 @@ def main() -> None:
     print(f"\n=== Budget audit: {args.results_dir} ({report['n_instances']} instances) ===")
     print(f"  steps (all traj):     {report['steps_all_trajectories']}")
     print(f"  steps (passing traj): {report['steps_passing_trajectories']}")
+    print(f"  tokens (arm total):   {report['tokens_arm_total']}")
+    print(f"  tokens (per traj):    {report['tokens_per_trajectory']}")
     over = report["passing_branches_over_reference_cap"]
     print(f"  passing branches over cap={args.reference_cap}: {len(over)} {over}")
 
