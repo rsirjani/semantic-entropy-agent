@@ -658,7 +658,7 @@ class PhasedOrchestrator:
             input={"search_report": search_report,
                    "problem_statement": self.problem_statement[:500],
                    "n_strategies": self.proposer.n_strategies,
-                   "temperature": 1.0},
+                   "temperature": self.proposer.temperature},
             phase="STRATEGY_PROPOSAL", trajectory_id="t0",
         )
 
@@ -1433,7 +1433,12 @@ class PhasedOrchestrator:
             f.write(f"\n{'='*70}\n")
             f.write(f"STRATEGY PROPOSAL\n")
             f.write(f"Proposed: {len(strategies)} | Clusters: {len(clusters)} | ")
-            f.write(f"Unique: {len(unique_strategies)} | Entropy: {entropy:.3f}\n")
+            # 6 decimals: the post-hoc tau sweep compares this against achievable-
+            # entropy grid values at the gate boundary; 3 decimals can round
+            # ACROSS the boundary (e.g. partition (2,2,1) of 5: 1.054920 -> 1.055
+            # > 1.0549). tau_sweep.py additionally recomputes the exact value
+            # from the cluster partition, but the logged value should not lie.
+            f.write(f"Unique: {len(unique_strategies)} | Entropy: {entropy:.6f}\n")
             f.write(f"{'='*70}\n")
             for i, s in enumerate(strategies):
                 cluster_id = "?"

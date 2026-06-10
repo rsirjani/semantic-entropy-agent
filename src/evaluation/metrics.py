@@ -215,6 +215,26 @@ def paired_permutation_pvalue(
     return float((np.sum(stats >= observed - 1e-12) + 1) / (n_resamples + 1))
 
 
+def min_achievable_sign_flip_p(gains: Sequence[float], tol: float = 1e-12) -> float | None:
+    """Lower bound on the exact sign-flip p-value given the zero pattern.
+
+    Sign flips on zero gains never change the |mean| statistic, so with z zeros
+    among n gains every sign pattern's statistic is duplicated 2^z times, and
+    the observed statistic is attained by at least the two global sign choices
+    on the nonzero entries: p >= 2 * 2^z / 2^n = 2^(1+z-n). Equivalently, with
+    m = n - z nonzero gains the test can NEVER report p < 2^(1-m) — at n = 10
+    that means p < 0.05 requires at least m = 6 instances with a nonzero,
+    consistently-signed difference. Reporting this alongside the p-value keeps
+    a null honest: "p = 0.25" may mean "underpowered given 8 ties", not
+    "evidence of no effect". Returns None for empty input.
+    """
+    arr = np.asarray(gains, dtype=float)
+    if arr.size == 0:
+        return None
+    z = int(np.sum(np.abs(arr) <= tol))
+    return float(min(1.0, 2.0 ** (1 + z - arr.size)))
+
+
 def bootstrap_ci(
     values: Sequence[float],
     statistic: Callable[[np.ndarray], float] = np.mean,

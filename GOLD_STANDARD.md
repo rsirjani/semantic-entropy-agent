@@ -208,7 +208,13 @@ deviation from a paper is intentional and documented (not a bug).
   discrete entropy takes only partition-of-N values (7 values at N=5), so τ is a
   cluster-partition-shape rule at small N, and the admissible τ grid is the
   achievable-entropy set, not a continuous dial. N must be held fixed across arms
-  and instances for τ/strata comparability (plug-in entropy bias varies with K, N).
+  and instances for τ/strata comparability (plug-in entropy bias varies with K, N)
+  — and because the proposer can under-deliver (<N parsed strategies), the
+  **realized** N must be reported per instance with non-modal-N instances flagged
+  and excluded from pooled τ/strata analyses, never silently mixed across
+  quantization grids. Gate reconstruction must compare at full precision
+  (recompute entropy from the logged cluster partition; a rounded log value can
+  cross a gate boundary).
 
 *Pass:* each ablation either has results, or is explicitly de-scoped in the
 writeup with justification.
@@ -240,7 +246,11 @@ writeup with justification.
   selector — one computable from the run artifacts alone (e.g. majority vote over
   normalized final-patch signatures with deterministic tie-breaks), no hidden
   tests, no oracle — → `selected-pass@1` on both arms, so the paper does not
-  overclaim the oracle number.
+  overclaim the oracle number. The selector's arm-asymmetry must be disclosed:
+  on the branching arm patches are one-per-cluster by construction, so a
+  majority-signature vote typically degenerates to its tie-break — the analysis
+  must report how often (degenerate-tiebreak count per arm), and must not invent
+  additional selectors after seeing results.
 
 ---
 
@@ -296,14 +306,26 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 - **R6.2 — Scope claims match the data:** claims are scoped to the instance set
   actually run (currently 10 easy SymPy; goal: full SWE-bench Lite). No
   generalization beyond what was measured.
-- **R6.5 — Pre-registered primary endpoint (multiple-comparison control):** the
-  sweep × arms × ablations grid is many cells; exactly ONE comparison is named
-  confirmatory *before* the GPU runs (currently: strategy-proposal, greedy, τ=0
-  superset vs matched-k vanilla at T=0.7, matched-k\* diverse-pass@k gain, exact
-  sign-flip test). Every other cell — temperatures, SDLG, clustering/τ ablations,
-  entropy strata, off-mode candidates — is labeled exploratory/descriptive in the
-  writeup. Changing the primary after seeing results is forbidden; if the runs
-  motivate a different primary, that is reported as a post-hoc finding.
+- **R6.5 — Pre-registered confirmatory family (multiple-comparison control):** the
+  sweep × arms × ablations grid is many cells; exactly ONE comparison **cell** is
+  named confirmatory *before* the GPU runs (currently: strategy-proposal, greedy,
+  τ=0 superset vs matched-k vanilla at T=0.7). Within that cell, the two halves of
+  the §0 headline form a **fixed-sequence (gatekeeping) family** at family-wise
+  α=0.05: **H1 = rarefied distinct-patch gain at matched k\*** (the diversity /
+  mode-collapse half — the title claim), then **H2 = matched-k\* diverse-pass@k
+  gain**, each with the exact sign-flip test, H2 confirmatory **only if H1
+  rejects** (otherwise H2 is descriptive). The order is fixed by the causal chain
+  (coverage can only move through diversity), not by the data; it makes the
+  coverage claim strictly harder than a lone H2 endpoint while giving the §0
+  diversity claim — previously descriptive-only — a confirmatory test. Every other
+  cell — temperatures, SDLG, clustering/τ ablations, entropy strata, off-mode
+  candidates — is labeled exploratory/descriptive in the writeup. Changing the
+  family or its order after seeing results is forbidden; if the runs motivate a
+  different endpoint, that is reported as a post-hoc finding. **Power floor
+  disclosure required:** the exact sign-flip p has a tie-imposed floor
+  p ≥ 2^(1+z−n) (z = zero gains); the analysis must report this
+  (`min_achievable_p`) beside every sign-flip p so a null is never presented as
+  evidence of no effect when the test could not have rejected.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
   manufacture wins), and per-arm token/compute accounting reported.

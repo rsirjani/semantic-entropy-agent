@@ -166,8 +166,49 @@ def test_compare_reports_sign_flip_p_and_rarefied_distinct(tmp_path):
                       preds_a=preds_a, preds_b=preds_b)
     # Two paired gains of +1 -> exact sign-flip p = 2/4 = 0.5.
     assert abs(comp["paired_sign_flip_p"] - 0.5) < 1e-9
+    # Power floor: no zero gains among n=2 -> min achievable p = 2^(1-2) = 0.5.
+    assert abs(comp["min_achievable_p"] - 0.5) < 1e-9
     # Rarefied distinct gain at k*=2: treatment 2 distinct, vanilla 1 -> +1.
     assert abs(comp["rarefied_distinct_gain"]["mean"] - 1.0) < 1e-9
+    # H1 (diversity) endpoint carries its own exact test + power floor + levels.
+    assert abs(comp["rarefied_distinct_gain"]["paired_sign_flip_p"] - 0.5) < 1e-9
+    assert abs(comp["rarefied_distinct_gain"]["min_achievable_p"] - 0.5) < 1e-9
+    assert abs(comp["rarefied_distinct_at_k_star"]["arm_a"]["mean"] - 2.0) < 1e-9
+    assert abs(comp["rarefied_distinct_at_k_star"]["arm_b"]["mean"] - 1.0) < 1e-9
+
+
+def test_load_predictions_dedupes_rerun_appends(tmp_path):
+    """Re-running the resample driver appends duplicate (iid, tid) rows; the
+    loader must keep the LAST occurrence, never inflate n."""
+    p = tmp_path / "dup.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "OLD", "trajectory_id": "run0"},
+        {"instance_id": "i1", "model_patch": "B", "trajectory_id": "run1"},
+        {"instance_id": "i1", "model_patch": "NEW", "trajectory_id": "run0"},  # re-run
+    ])
+    preds = cm.load_predictions(str(p))
+    assert sorted(preds["i1"]) == ["B", "NEW"]   # 2 trajectories, last run0 wins
+
+
+def test_selected_pass_at_1_flags_degenerate_tiebreak(tmp_path):
+    """On the branching arm all signatures are typically unique by construction;
+    the selector must DISCLOSE that 'majority' was a pure tie-break there."""
+    d = tmp_path / "edeg"
+    d.mkdir()
+    with open(os.path.join(str(d), "trajectory_eval_i1.json"), "w", encoding="utf-8") as f:
+        json.dump({"instance_id": "i1", "trajectories": [
+            {"trajectory_id": "t0", "resolved": True},
+            {"trajectory_id": "t1", "resolved": False},
+        ]}, f)
+    p = tmp_path / "pdeg.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+x=1\n", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+y=2\n", "trajectory_id": "t1"},
+    ])
+    out = cm.selected_pass_at_1(str(p), str(d))
+    row = out["per_instance"]["i1"]
+    assert row["majority_multiplicity"] == 1 and row["degenerate_tiebreak"] is True
+    assert out["n_degenerate_tiebreak_instances"] == 1
 
 
 def test_selected_pass_at_1_majority_signature(tmp_path):

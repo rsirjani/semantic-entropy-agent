@@ -61,6 +61,12 @@ def partition_entropies(n: int) -> list[float]:
 
     One value per integer partition of n: H = -sum (m_i/n) log(m_i/n). This IS
     the admissible tau grid — taus between adjacent values are equivalent.
+
+    Values are FULL precision (not display-rounded): the sweep's gate compares
+    `entropy > tau` exactly like the orchestrator does, so rounding the grid
+    would shift boundary decisions (e.g. the (2,2,1) partition of 5 has
+    H = 1.054920…, which a 3-or-4-decimal rounding can flip across the gate).
+    Dedup uses a 1e-9 tolerance only to merge float noise.
     """
     parts: list[list[int]] = []
 
@@ -74,11 +80,31 @@ def partition_entropies(n: int) -> list[float]:
             acc.pop()
 
     rec(n, n, [])
-    vals = set()
+    vals: list[float] = []
     for part in parts:
-        h = -sum((m / n) * math.log(m / n) for m in part)
-        vals.add(abs(round(h, 4)))  # abs() normalizes -0.0 from the [n] partition
+        h = abs(-sum((m / n) * math.log(m / n) for m in part))  # abs: -0.0 -> 0.0
+        if not any(abs(h - v) <= 1e-9 for v in vals):
+            vals.append(h)
     return sorted(vals)
+
+
+def exact_partition_entropy(cluster_sizes: list[int]) -> float | None:
+    """Full-precision plug-in entropy from cluster sizes, or None if unusable.
+
+    The discrete semantic entropy is a deterministic function of the cluster
+    partition, so when the log yields the per-strategy cluster assignments we
+    can recompute it EXACTLY instead of trusting the log's rounded `Entropy:`
+    value. This matters at gate boundaries: the log prints few decimals, and
+    e.g. the (2,2,1) partition of 5 (H = 1.054920…) rounds at 3 decimals to
+    1.055 > 1.0549, which would make the post-hoc sweep branch at the exact
+    achievable-grid tau where a real run gates.
+    """
+    if not cluster_sizes:
+        return None
+    n = sum(cluster_sizes)
+    if n <= 0:
+        return None
+    return abs(-sum((m / n) * math.log(m / n) for m in cluster_sizes if m > 0))
 
 
 def parse_instance(results_dir: str, iid: str) -> dict | None:
@@ -109,8 +135,20 @@ def parse_instance(results_dir: str, iid: str) -> dict | None:
                 ci = int(sm.group(2))
                 if 0 <= ci < n_clusters:
                     sizes[ci] += 1
-            return {"entropy": entropy, "cluster_sizes": sizes,
-                    "arm": "strategy_proposal"}
+            # Prefer the EXACT recomputed entropy over the log's rounded value
+            # when they agree to within log-rounding tolerance (6e-4 covers a
+            # 3-decimal log). Disagreement beyond that means the run did not use
+            # the discrete partition entropy (e.g. kernel/von-Neumann, whose
+            # value is NOT a function of cluster sizes) — keep the logged value
+            # and say so, never silently overwrite it.
+            exact = exact_partition_entropy(sizes)
+            if exact is not None and abs(exact - entropy) <= 6e-4:
+                return {"entropy": exact, "entropy_source": "recomputed_from_cluster_sizes",
+                        "cluster_sizes": sizes, "arm": "strategy_proposal"}
+            return {"entropy": entropy,
+                    "entropy_source": ("parsed_log_disagrees_with_partition"
+                                       if exact is not None else "parsed_log"),
+                    "cluster_sizes": sizes, "arm": "strategy_proposal"}
     blog = os.path.join(results_dir, iid, "branching_log.json")
     if os.path.isfile(blog):
         try:
@@ -118,8 +156,8 @@ def parse_instance(results_dir: str, iid: str) -> dict | None:
                 events = json.load(f)
             ents = [e["entropy"] for e in events if "entropy" in e]
             if ents:
-                return {"entropy": float(ents[0]), "cluster_sizes": None,
-                        "arm": "sdlg"}
+                return {"entropy": float(ents[0]), "entropy_source": "branching_log",
+                        "cluster_sizes": None, "arm": "sdlg"}
         except Exception:
             pass
     return None
@@ -150,17 +188,34 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
 
     usable = sorted(parsed)
     skipped = sorted(set(iids) - set(usable))
+
+    # Realized N per instance. The config holds N fixed (n_strategies = 5), but
+    # the proposer can under-deliver (parse failure, short rejection pass), and
+    # entropy values from different N are NOT on the same quantization grid —
+    # so the realized N must be REPORTED, not assumed. The grid uses the MODAL
+    # N; instances at a different N are flagged, never silently pooled.
+    n_by_instance = {iid: sum(parsed[iid]["cluster_sizes"])
+                     for iid in usable
+                     if parsed[iid]["cluster_sizes"]
+                     and sum(parsed[iid]["cluster_sizes"]) > 0}
     n_candidates = None
-    for iid in usable:
-        sizes = parsed[iid]["cluster_sizes"]
-        if sizes:
-            n_candidates = sum(sizes)
-            break
+    if n_by_instance:
+        counts: dict[int, int] = {}
+        for v in n_by_instance.values():
+            counts[v] = counts.get(v, 0) + 1
+        # Modal N; ties break to the LARGER N (the configured n_strategies is
+        # an upper bound — under-delivery is the anomaly, not the target).
+        n_candidates = max(sorted(counts), key=lambda v: (counts[v], v))
+    non_modal = sorted(i for i, v in n_by_instance.items() if v != n_candidates)
 
     if taus is None:
         taus = partition_entropies(n_candidates) if n_candidates else \
             [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
 
+    # Gate semantics replicate the orchestrator: branch iff entropy > tau, at
+    # FULL precision. The 1e-9 epsilon only absorbs float noise so that a tau
+    # set exactly at an achievable entropy level gates that level (a real run
+    # replicates row tau=h_i by setting tau anywhere in [h_i, next level)).
     rows = []
     for tau in taus:
         branched, used, passed = [], [], []
@@ -168,7 +223,7 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
         for iid in usable:
             info = parsed[iid]
             outcomes = evals.get(iid, {})
-            if info["entropy"] > tau:
+            if info["entropy"] > tau + 1e-9:
                 branched.append(1)
                 used.append(len(outcomes))
                 passed.append(1.0 if any(outcomes.values()) else 0.0)
@@ -193,6 +248,8 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
         "n_instances": len(usable),
         "skipped_instances": skipped,
         "n_candidates": n_candidates,
+        "n_candidates_by_instance": n_by_instance,
+        "non_modal_n_instances": non_modal,
         "achievable_entropies": (partition_entropies(n_candidates)
                                  if n_candidates else None),
         "per_instance": {iid: parsed[iid] for iid in usable},
@@ -204,8 +261,13 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
             "a real tau>0 run modulo vLLM nondeterminism. gated_pass_rate at the "
             "smallest tau equals the full-branch (oracle) rate; at large tau it "
             "approaches the single-dominant-trajectory rate. The tau grid is the "
-            "ACHIEVABLE entropy set for N candidates (entropy is partition-"
-            "quantized at small N); intermediate taus are equivalent."),
+            "ACHIEVABLE entropy set for the MODAL N (entropy is partition-"
+            "quantized at small N); intermediate taus are equivalent. Entropies "
+            "are recomputed at full precision from the logged cluster partition "
+            "when consistent with the logged value (entropy_source per instance); "
+            "instances whose realized N deviates from the modal N are listed in "
+            "non_modal_n_instances — their entropies sit on a DIFFERENT "
+            "quantization grid and must not be pooled silently."),
     }
 
 
@@ -222,13 +284,18 @@ def main() -> None:
     report = sweep(args.results_dir, args.eval, args.taus)
     print(f"\n=== tau sweep: {args.results_dir} ({report['n_instances']} instances, "
           f"N={report['n_candidates']}) ===")
-    print(f"  achievable entropies (quantization at N): {report['achievable_entropies']}")
+    ach = report["achievable_entropies"]
+    print(f"  achievable entropies (quantization at N): "
+          f"{[round(v, 4) for v in ach] if ach else ach}")
     print(f"  {'tau':>8} {'branch_rate':>12} {'mean_traj':>10} {'gated_pass':>11}")
     for r in report["sweep"]:
-        print(f"  {r['tau']:>8} {r['branch_rate']:>12} "
+        print(f"  {round(r['tau'], 4):>8} {r['branch_rate']:>12} "
               f"{r['mean_trajectories_used']:>10} {r['gated_pass_rate']:>11}")
     if report["skipped_instances"]:
         print(f"  skipped (no entropy artifact): {report['skipped_instances']}")
+    if report["non_modal_n_instances"]:
+        print(f"  WARNING — realized N deviates from modal N={report['n_candidates']} "
+              f"on: {report['non_modal_n_instances']} (different quantization grid)")
 
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

@@ -38,8 +38,8 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.evaluation.metrics import (
     bootstrap_ci, diverse_pass_at_k, distinct_patch_count, expected_distinct_at_k,
-    mean_pairwise_distance, paired_permutation_pvalue, pass_at_k,
-    select_majority_patch,
+    mean_pairwise_distance, min_achievable_sign_flip_p, paired_permutation_pvalue,
+    pass_at_k, patch_signature, select_majority_patch,
 )  # distinct_patch_count is reused by set_valued_evidence below
 
 import numpy as np
@@ -50,11 +50,16 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 
 def load_predictions(path: str) -> dict[str, list[str]]:
-    """instance_id -> list of trajectory patches (drops the duplicated 'primary')."""
-    by_instance: dict[str, list[str]] = {}
-    for iid, traj_id, patch in _iter_trajectory_predictions(path):
-        by_instance.setdefault(iid, []).append(patch)
-    return by_instance
+    """instance_id -> list of trajectory patches (drops the duplicated 'primary').
+
+    Deduplicates by (instance_id, trajectory_id), keeping the LAST occurrence:
+    the resample driver appends to predictions_all_trajectories.jsonl, so a
+    re-run without --skip-existing would otherwise silently inflate n (and with
+    it every per-instance k, rarefaction denominator, and pairwise-distance
+    set) with stale duplicate rows.
+    """
+    return {iid: list(by_tid.values())
+            for iid, by_tid in load_predictions_by_tid(path).items()}
 
 
 def _iter_trajectory_predictions(path: str):
@@ -261,9 +266,15 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
         "diverse_pass_at_k_gain": {"mean": round(pt, 4), "ci95": [round(lo, 4), round(hi, 4)]},
         # Exact paired sign-flip test (all 2^n sign patterns at n<=20): the
         # primary small-n inference, more trustworthy than a percentile
-        # bootstrap over lumpy 0/1 gains at n=10.
+        # bootstrap over lumpy 0/1 gains at n=10. min_achievable_p is the
+        # floor the zero pattern imposes (p >= 2^(1+z-n)): if it exceeds 0.05
+        # the test could not have reached significance no matter the direction
+        # of the nonzero gains — a power disclosure, so a null is never read
+        # as evidence of no effect when it is merely too many ties.
         "paired_sign_flip_p": (round(paired_permutation_pvalue(gains, seed=seed), 5)
                                if gains else None),
+        "min_achievable_p": (round(min_achievable_sign_flip_p(gains), 5)
+                             if gains else None),
         "k_mismatch_instances": k_mismatch,
         "instances_only_in_a": sorted(set(table_a) - set(table_b)),
         "instances_only_in_b": sorted(set(table_b) - set(table_a)),
@@ -271,9 +282,14 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
 
     # Rarefied diversity at the same common k*: raw distinct counts rise
     # mechanically with sample size, so cross-arm diversity differences use the
-    # rarefaction estimator E[#distinct in a random k*-subset].
+    # rarefaction estimator E[#distinct in a random k*-subset]. This is the
+    # H1 (diversity / mode-collapse) endpoint of the fixed-sequence
+    # confirmatory family (R6.5): it gets the same exact sign-flip test and
+    # power floor as the coverage gain, plus PER-ARM rarefied levels so the
+    # results table can show each arm's diversity at the common k*, not only
+    # the difference.
     if preds_a is not None and preds_b is not None:
-        rare_diffs = []
+        rare_diffs, rare_a, rare_b = [], [], []
         for i in usable:
             pa, pb = preds_a.get(i, []), preds_b.get(i, [])
             if not pa or not pb:
@@ -281,13 +297,26 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
             k_star = min(table_a[i]["k"], table_b[i]["k"], len(pa), len(pb))
             if k_star <= 0:
                 continue
-            rare_diffs.append(expected_distinct_at_k(pa, k_star)
-                              - expected_distinct_at_k(pb, k_star))
+            ra = expected_distinct_at_k(pa, k_star)
+            rb = expected_distinct_at_k(pb, k_star)
+            rare_a.append(ra)
+            rare_b.append(rb)
+            rare_diffs.append(ra - rb)
         if rare_diffs:
             rpt, rlo, rhi = bootstrap_ci(rare_diffs, np.mean, seed=seed)
+            apt, alo, ahi = bootstrap_ci(rare_a, np.mean, seed=seed)
+            bpt, blo, bhi = bootstrap_ci(rare_b, np.mean, seed=seed)
             result["rarefied_distinct_gain"] = {
                 "mean": round(rpt, 4), "ci95": [round(rlo, 4), round(rhi, 4)],
                 "n": len(rare_diffs),
+                "paired_sign_flip_p": round(
+                    paired_permutation_pvalue(rare_diffs, seed=seed), 5),
+                "min_achievable_p": round(
+                    min_achievable_sign_flip_p(rare_diffs), 5),
+            }
+            result["rarefied_distinct_at_k_star"] = {
+                "arm_a": {"mean": round(apt, 4), "ci95": [round(alo, 4), round(ahi, 4)]},
+                "arm_b": {"mean": round(bpt, 4), "ci95": [round(blo, 4), round(bhi, 4)]},
             }
 
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
@@ -359,6 +388,7 @@ def selected_pass_at_1(predictions_path: str, eval_path: str) -> dict:
     evals = load_eval_by_tid(eval_path)
     per_instance: dict[str, dict] = {}
     outcomes: list[float] = []
+    n_degenerate = 0
     for iid in sorted(set(preds) & set(evals)):
         tids = [t for t in preds[iid] if t in evals[iid]]
         if not tids:
@@ -371,13 +401,31 @@ def selected_pass_at_1(predictions_path: str, eval_path: str) -> dict:
             continue
         tid = tids[sel]
         resolved = bool(evals[iid][tid])
-        per_instance[iid] = {"selected_tid": tid, "resolved": resolved}
+        # Degeneracy disclosure: when every non-empty signature is unique
+        # (multiplicity 1), "majority" carries no information — the pick is the
+        # earliest-seen tie-break. On the BRANCHING arm this is the typical
+        # case BY CONSTRUCTION (one trajectory per semantic cluster), so its
+        # selected-pass@1 is closer to first-trajectory-pass@1 than to true
+        # self-consistency; the vanilla arm's resamples carry real multiplicity.
+        winner_sig = patch_signature(patches[sel])
+        winner_mult = sum(1 for p in patches if patch_signature(p) == winner_sig)
+        degenerate = winner_mult <= 1
+        n_degenerate += int(degenerate)
+        per_instance[iid] = {"selected_tid": tid, "resolved": resolved,
+                             "majority_multiplicity": winner_mult,
+                             "degenerate_tiebreak": degenerate}
         outcomes.append(1.0 if resolved else 0.0)
     return {
         "selector": "majority normalized-patch signature (self-consistency)",
         "n_instances": len(outcomes),
         "selected_pass_at_1": (round(float(np.mean(outcomes)), 4)
                                if outcomes else None),
+        "n_degenerate_tiebreak_instances": n_degenerate,
+        "degeneracy_note": (
+            "degenerate_tiebreak=True means all non-empty signatures were "
+            "unique, so the 'majority' pick was pure earliest-seen tie-break. "
+            "Expected often on the branching arm (clusters are deduplicated by "
+            "construction); compare selectors in that light."),
         "per_instance": per_instance,
     }
 
@@ -437,16 +485,23 @@ def main() -> None:
         report["comparison"] = comp
         g = comp["diverse_pass_at_k_gain"]
         print(f"\n=== {args.label_a} − {args.label_b} ===")
-        print(f"  diverse-pass@k* gain (metric-time matched k): {g['mean']}  "
+        print(f"  [H2/coverage] diverse-pass@k* gain (metric-time matched k): {g['mean']}  "
               f"CI95={g['ci95']}  (n={comp['n_compared_instances']})")
-        print(f"  exact paired sign-flip p: {comp['paired_sign_flip_p']}")
+        print(f"  [H2/coverage] exact paired sign-flip p: {comp['paired_sign_flip_p']}  "
+              f"(power floor given ties: min achievable p = {comp['min_achievable_p']})")
         if comp["k_mismatch_instances"]:
             print(f"  WARNING — per-instance k mismatch on "
                   f"{len(comp['k_mismatch_instances'])} instance(s); compared at "
                   f"k*=min(k_a,k_b): {comp['k_mismatch_instances']}")
         if "rarefied_distinct_gain" in comp:
             r = comp["rarefied_distinct_gain"]
-            print(f"  rarefied distinct-patch gain @k*: {r['mean']}  CI95={r['ci95']}")
+            print(f"  [H1/diversity] rarefied distinct-patch gain @k*: {r['mean']}  "
+                  f"CI95={r['ci95']}  sign-flip p={r['paired_sign_flip_p']}  "
+                  f"(min achievable p = {r['min_achievable_p']})")
+            ra = comp["rarefied_distinct_at_k_star"]
+            print(f"  [H1/diversity] per-arm rarefied distinct @k*: "
+                  f"{args.label_a}={ra['arm_a']['mean']} CI95={ra['arm_a']['ci95']}, "
+                  f"{args.label_b}={ra['arm_b']['mean']} CI95={ra['arm_b']['ci95']}")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]
