@@ -9,26 +9,43 @@ verdict, not a vibe. Every iteration must score each rubric item as
 results artifact), and may only declare `gold_standard_met: true` when every
 **[BLOCKER]** item is `pass` and no `blocking_gaps` remain.
 
-**Spec evolution — the ratchet.** This rubric may *improve*, but only toward more
-rigor, and never in a way the optimizer can use to grade itself into a pass. Two
-channels:
+**Spec evolution — the ratchet** *(policy v2, human-ratified 2026-06-09: value-level
+design judgment delegated to the scrutiny charter; the anti-self-serving tripwire
+retained).* This rubric may evolve under the agent's own research judgment, with one
+inviolable constraint: never in a way the optimizer can use to grade the
+**already-existing artifact** into a pass without doing the work. Three channels:
 
 - **Auto-applicable corrections.** The loop MAY directly edit this file to apply a
   *correction* — an amendment that is mathematically or logically **derivable** (a
   biased estimator, an inconsistent definition, a broken identity) AND that
   **increases** rigor. It must record the derivation + classification in
   `review_loop/spec_amendments/`.
-- **Quarantined proposals.** Any amendment that **relaxes** a BLOCKER, rests on a
-  **value / convention** judgment (what counts as "enough", what diversity
-  "means"), or would make the **current artifact pass** MUST NOT be applied — it is
-  written as a proposal in `review_loop/spec_amendments/` for human ratification.
+- **Value-level design amendments (scrutiny charter).** The loop MAY directly apply
+  amendments that rest on **research judgment** — redefining a comparison it argues
+  is fairer, recalibrating a default, adding/strengthening a requirement, or
+  explicitly de-scoping a claim — PROVIDED the amendment (i) is argued from the
+  science (papers, math, the end-goal claim), not from convenience; (ii) does NOT
+  have the effect of flipping any rubric item to `pass` for the artifact as it
+  exists at the time of the edit, nor of reducing the evidence required for the
+  headline claim while the corresponding work remains undone; (iii) any de-scoping
+  is disclosed as such in the writeup's threats/limitations; and (iv) the full
+  rationale + rejected alternatives are recorded in
+  `review_loop/spec_amendments/applied_<NN>_<slug>.md`.
+- **Quarantined proposals.** Any amendment whose effect is that the current
+  artifact newly passes, or that trades away evidence for the headline claim to
+  avoid work, MUST NOT be applied — it is written as a proposal in
+  `review_loop/spec_amendments/` for human ratification.
 
 Enforcement is external, not trusted: after every iteration an independent
-adversarial **spec-critic** reviews any change to this file, and the wrapper
-**reverts** it unless the critic confirms it is a derivable, rigor-increasing
-correction that lowers no BLOCKER and is not self-serving. The agent therefore
-cannot move the finish line toward itself — the bar may get harder for provable
-reasons; it may not get easier for convenient ones.
+adversarial **spec-critic** reviews any change to this file from the lens of a
+senior researcher. It APPROVES corrections and scientifically-argued value
+amendments (channels 1–2), and the wrapper **reverts** any edit whose effect is
+self-serving — making the existing artifact pass, or weakening the evidence bar for
+convenience (channel 3 violations). Reverted edits are preserved as diffs in
+`review_loop/spec_amendments/` so the idea is never lost, only the autonomous
+application. The agent therefore has full design authority EXCEPT the one power no
+self-grading agent can safely hold: moving the finish line onto its own current
+position.
 
 **Section order:** §0/§0.1 are framing; §1–§9 are the rubric (all BLOCKERs come
 first, §1–§8; §9 is a tracked roadmap dimension); §10 (writeup) is last because it

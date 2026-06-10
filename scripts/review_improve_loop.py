@@ -199,12 +199,20 @@ file-system-windows-python read-file MCP tool). Then do the following, in order:
    tests, analysis scripts, docs) with real edits, verified (py_compile, pytest).
    {experiments_clause} Write the full scrutiny record — big picture, findings,
    decisions, rejected alternatives WITH reasons — to
-   `review_loop/scrutiny_{iteration:02d}.md`. Design changes that rest on value
-   judgments or would alter what the rubric demands go through the spec ratchet:
-   write them as quarantined proposals in `review_loop/spec_amendments/` for human
-   ratification, do NOT edit GOLD_STANDARD.md for them (derivable rigor-INCREASING
-   corrections may be applied directly, per the spec's ratchet rule — an
-   independent critic reviews and reverts anything else).
+   `review_loop/scrutiny_{iteration:02d}.md`. You have FULL DESIGN AUTHORITY over
+   the spec (ratchet policy v2, see GOLD_STANDARD.md "Spec evolution"): you MAY
+   directly edit GOLD_STANDARD.md to apply value-level design amendments — fairer
+   comparison definitions, recalibrated defaults, added or strengthened
+   requirements, explicitly disclosed de-scopings — judged from a high-scrutiny,
+   well-rounded research perspective and argued from the science. Record each
+   applied amendment's rationale + rejected alternatives in
+   `review_loop/spec_amendments/applied_{iteration:02d}_<slug>.md`. The ONE thing
+   you may not do: an edit whose effect is that the CURRENT artifact gets closer
+   to "done" without the work being done — flipping an item to pass as-is, or
+   reducing the evidence required for the headline claim while it remains
+   ungathered. An independent critic reviews every spec edit and reverts
+   self-serving ones (the diff is preserved for human ratification); everything
+   scientifically argued survives.
 
 5. WRITE THE VERDICT `{verdict_path_rel}` as JSON exactly matching the schema at
    the bottom of GOLD_STANDARD.md, iteration {iteration}. In this charter,
@@ -312,6 +320,39 @@ Output EXACTLY one JSON object and nothing else:
 {{"verdict": "approve" | "reject", "reason": "<one sentence>"}}"""
 
 
+SCRUTINY_CRITIC_PROMPT = """You are an INDEPENDENT senior researcher reviewing a
+change another agent made to a research project's gold-standard rubric during a
+first-principles design review. The agent has FULL design authority — corrections,
+value-level redefinitions, recalibrations, added requirements, and explicitly
+disclosed de-scopings are all legitimate IF argued from the science. You police
+exactly ONE failure mode: a self-grading agent moving the finish line onto its own
+current position.
+
+REJECT ONLY if the change's EFFECT is self-serving:
+- it would flip any rubric item to `pass` for the artifact AS IT EXISTS NOW,
+  without the corresponding work being done;
+- it reduces or removes evidence required for the headline claim while that
+  evidence remains ungathered (trading rigor away to avoid work);
+- it deletes or hollows out the DONE bar, the ratchet itself, or the requirement
+  that claims be scoped to what was measured.
+
+APPROVE everything else — including changes that rest on value/convention judgment,
+make the bar HARDER, redefine a comparison the agent argues is fairer, or de-scope a
+claim with explicit disclosure — provided the edit is accompanied by a scientific
+rationale (in the diff or referenced amendment file) rather than mere convenience.
+When uncertain whether the motive is science or self-service, REJECT (the diff is
+preserved for human ratification; nothing is lost).
+
+--- RUBRIC BEFORE ---
+{before}
+--- RUBRIC AFTER ---
+{after}
+--- END ---
+
+Output EXACTLY one JSON object and nothing else:
+{{"verdict": "approve" | "reject", "reason": "<one sentence>"}}"""
+
+
 def _read_text(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -339,32 +380,52 @@ def _parse_critic_verdict(text: str) -> tuple[str, str]:
 def enforce_spec_ratchet(exe: str, iteration: int, spec_before: str, args) -> float:
     """If the iteration edited GOLD_STANDARD.md, have an independent critic judge it.
 
-    Reverts the change unless the critic confirms a derivable, rigor-increasing
-    correction. Returns the critic's reported cost (0 if no spec change). The critic
-    runs in read-only 'plan' mode so it cannot itself touch the repo.
+    rubric charter: revert unless a derivable, rigor-increasing correction.
+    scrutiny charter: the agent has full design authority (value-level amendments
+    included); revert ONLY self-serving edits — those whose effect is that the
+    current artifact passes without work, or that trade away evidence to avoid
+    work. Rejected edits are preserved as a diff in spec_amendments/ so the idea
+    survives for human ratification. Returns the critic's reported cost (0 if no
+    spec change). The critic runs in read-only 'plan' mode so it cannot itself
+    touch the repo.
     """
     spec_after = _read_text(SPEC_PATH)
     if spec_after == spec_before:
         return 0.0
     print("  Spec change detected in GOLD_STANDARD.md -> independent spec-critic review...")
+    critic_prompt = (SCRUTINY_CRITIC_PROMPT if getattr(args, "charter", "rubric") == "scrutiny"
+                     else CRITIC_PROMPT)
     res = run_claude(
-        exe, CRITIC_PROMPT.format(before=spec_before, after=spec_after),
+        exe, critic_prompt.format(before=spec_before, after=spec_after),
         model=args.model, max_turns=4, permission_mode="plan",
         timeout=600, resume_session=None,
     )
     verdict, reason = _parse_critic_verdict(res["result"])
     record = {"iteration": iteration, "verdict": verdict, "reason": reason,
+              "charter": getattr(args, "charter", "rubric"),
               "critic_subtype": res["subtype"]}
     os.makedirs(SPEC_AMEND_DIR, exist_ok=True)
     with open(os.path.join(SPEC_AMEND_DIR, f"critic_{iteration:02d}.json"), "w",
               encoding="utf-8") as f:
         json.dump(record, f, indent=2)
     if verdict == "approve":
-        print(f"  Spec-critic APPROVED (rigor-increasing correction): {reason}")
+        print(f"  Spec-critic APPROVED: {reason}")
     else:
+        # Preserve the rejected edit as a unified diff before reverting, so a
+        # potentially good idea is quarantined for human ratification, not lost.
+        import difflib
+        diff = "".join(difflib.unified_diff(
+            spec_before.splitlines(keepends=True), spec_after.splitlines(keepends=True),
+            fromfile="GOLD_STANDARD.md (kept)", tofile="GOLD_STANDARD.md (rejected edit)",
+        ))
+        with open(os.path.join(SPEC_AMEND_DIR, f"rejected_{iteration:02d}.diff"), "w",
+                  encoding="utf-8") as f:
+            f.write(f"# Spec-critic rejection (iteration {iteration}): {reason}\n{diff}")
         with open(SPEC_PATH, "w", encoding="utf-8") as f:
             f.write(spec_before)
-        print(f"  Spec-critic REJECTED -> reverted GOLD_STANDARD.md. Reason: {reason}")
+        print(f"  Spec-critic REJECTED -> reverted GOLD_STANDARD.md "
+              f"(edit preserved in spec_amendments/rejected_{iteration:02d}.diff). "
+              f"Reason: {reason}")
     return res["total_cost_usd"]
 
 
