@@ -37,7 +37,9 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.evaluation.metrics import (
-    bootstrap_ci, diverse_pass_at_k, distinct_patch_count, mean_pairwise_distance,
+    bootstrap_ci, diverse_pass_at_k, distinct_patch_count, expected_distinct_at_k,
+    mean_pairwise_distance, paired_permutation_pvalue, pass_at_k,
+    select_majority_patch,
 )  # distinct_patch_count is reused by set_valued_evidence below
 
 import numpy as np
@@ -226,31 +228,85 @@ def summarize(table: dict[str, dict], seed: int) -> dict:
 # --------------------------------------------------------------------------- #
 
 def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
-            split: float | None) -> dict:
+            split: float | None, preds_a: dict | None = None,
+            preds_b: dict | None = None) -> dict:
     shared = sorted(set(table_a) & set(table_b))
-    gains = [table_a[i]["diverse_pass_at_k"] - table_b[i]["diverse_pass_at_k"] for i in shared]
+
+    # Matched-k is enforced AT METRIC TIME, not just at run time: each shared
+    # instance is compared at the common k* = min(k_a, k_b) via the unbiased
+    # Chen estimator pass@k*(n, c). With equal k this reduces to the plain
+    # any-pass difference; with unequal k (failed resamples, --max-k, capture
+    # loss) it removes the mechanical advantage of the larger arm instead of
+    # silently comparing apples to oranges.
+    gains: list[float] = []
+    k_mismatch: list[dict] = []
+    usable: list[str] = []
+    for i in shared:
+        ka, kb = table_a[i]["k"], table_b[i]["k"]
+        k_star = min(ka, kb)
+        if k_star <= 0:
+            k_mismatch.append({"instance_id": i, "k_a": ka, "k_b": kb,
+                               "skipped": True})
+            continue
+        if ka != kb:
+            k_mismatch.append({"instance_id": i, "k_a": ka, "k_b": kb,
+                               "compared_at_k": k_star, "skipped": False})
+        gains.append(pass_at_k(ka, table_a[i]["n_resolved"], k_star)
+                     - pass_at_k(kb, table_b[i]["n_resolved"], k_star))
+        usable.append(i)
     pt, lo, hi = bootstrap_ci(gains, np.mean, seed=seed)
     result = {
         "n_shared_instances": len(shared),
+        "n_compared_instances": len(usable),
         "diverse_pass_at_k_gain": {"mean": round(pt, 4), "ci95": [round(lo, 4), round(hi, 4)]},
+        # Exact paired sign-flip test (all 2^n sign patterns at n<=20): the
+        # primary small-n inference, more trustworthy than a percentile
+        # bootstrap over lumpy 0/1 gains at n=10.
+        "paired_sign_flip_p": (round(paired_permutation_pvalue(gains, seed=seed), 5)
+                               if gains else None),
+        "k_mismatch_instances": k_mismatch,
         "instances_only_in_a": sorted(set(table_a) - set(table_b)),
         "instances_only_in_b": sorted(set(table_b) - set(table_a)),
     }
 
+    # Rarefied diversity at the same common k*: raw distinct counts rise
+    # mechanically with sample size, so cross-arm diversity differences use the
+    # rarefaction estimator E[#distinct in a random k*-subset].
+    if preds_a is not None and preds_b is not None:
+        rare_diffs = []
+        for i in usable:
+            pa, pb = preds_a.get(i, []), preds_b.get(i, [])
+            if not pa or not pb:
+                continue
+            k_star = min(table_a[i]["k"], table_b[i]["k"], len(pa), len(pb))
+            if k_star <= 0:
+                continue
+            rare_diffs.append(expected_distinct_at_k(pa, k_star)
+                              - expected_distinct_at_k(pb, k_star))
+        if rare_diffs:
+            rpt, rlo, rhi = bootstrap_ci(rare_diffs, np.mean, seed=seed)
+            result["rarefied_distinct_gain"] = {
+                "mean": round(rpt, 4), "ci95": [round(rlo, 4), round(rhi, 4)],
+                "n": len(rare_diffs),
+            }
+
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
     # `thr` is computed ONCE here and reused for the R5.4 low-entropy flag below so
     # the two analyses cannot disagree about which instances are "low entropy".
-    ent_shared = {i: entropy[i] for i in shared if i in entropy}
+    # Strata reuse the SAME matched-k gains as the headline (never recomputed at
+    # each arm's own k). At n=10 the strata are DESCRIPTIVE, not confirmatory.
+    gain_by_iid = dict(zip(usable, gains))
+    ent_shared = {i: entropy[i] for i in usable if i in entropy}
     thr = split
     if thr is None and len(ent_shared) >= 2:
         thr = float(np.median(list(ent_shared.values())))
     if len(ent_shared) >= 2:
         strata = {"low_entropy": [], "high_entropy": []}
-        for i in shared:
+        for i in usable:
             if i not in ent_shared:
                 continue
             bucket = "high_entropy" if ent_shared[i] > thr else "low_entropy"
-            strata[bucket].append(table_a[i]["diverse_pass_at_k"] - table_b[i]["diverse_pass_at_k"])
+            strata[bucket].append(gain_by_iid[i])
         result["entropy_split_threshold"] = round(thr, 4)
         result["gain_by_stratum"] = {
             b: {"n": len(v), "mean_gain": round(float(np.mean(v)), 4) if v else None}
@@ -262,18 +318,68 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
     # If no entropy split could be established, low_entropy is left None (unknown),
     # never silently tagged via a hardcoded cutoff.
     off_mode = []
-    for i in shared:
+    for i in usable:
         a_pass = table_a[i]["n_resolved"] > 0
         b_pass = table_b[i]["n_resolved"] > 0
         if a_pass and not b_pass:
             e = entropy.get(i)
             low = (e is not None and thr is not None and e <= thr) if thr is not None else None
+            kb, cb = table_b[i]["k"], table_b[i]["n_resolved"]
             off_mode.append({"instance_id": i, "post_search_entropy": e,
-                             "low_entropy": low})
+                             "low_entropy": low,
+                             "treatment_k": table_a[i]["k"],
+                             "treatment_n_resolved": table_a[i]["n_resolved"],
+                             "vanilla_k": kb, "vanilla_n_resolved": cb})
     result["off_mode_recovery_candidates"] = off_mode
     result["note"] = ("off_mode_recovery with low_entropy=True is the §0.1 case-3 "
-                      "mode-collapse signature the entropy gate cannot predict.")
+                      "mode-collapse signature the entropy gate cannot predict. "
+                      "CHANCE-LEVEL CAVEAT: with small k, 'vanilla 0/k passed' can be "
+                      "sampling noise rather than mode collapse — e.g. at a true "
+                      "per-sample pass rate p, P(0 of k) = (1-p)^k. Each record "
+                      "therefore carries both arms' (k, n_resolved) so readers can "
+                      "judge the strength of each candidate; treat these as candidates, "
+                      "not confirmed signatures, unless replicated across temperatures.")
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Selection-aware accuracy (R4.4) — deployable, artifact-only selector
+# --------------------------------------------------------------------------- #
+
+def selected_pass_at_1(predictions_path: str, eval_path: str) -> dict:
+    """selected-pass@1 under the majority-signature (self-consistency) selector.
+
+    For each instance, pick ONE trajectory by majority vote over normalized
+    patch signatures (ties -> earliest occurrence; empty patches never win) and
+    report whether THAT trajectory resolved. This is a deployable rule — it uses
+    only the predictions artifacts, no hidden tests, no NLI — so it complements
+    the oracle diverse-pass@k row without overclaiming it.
+    """
+    preds = load_predictions_by_tid(predictions_path)
+    evals = load_eval_by_tid(eval_path)
+    per_instance: dict[str, dict] = {}
+    outcomes: list[float] = []
+    for iid in sorted(set(preds) & set(evals)):
+        tids = [t for t in preds[iid] if t in evals[iid]]
+        if not tids:
+            continue
+        patches = [preds[iid][t] for t in tids]
+        sel = select_majority_patch(patches)
+        if sel is None:  # every patch empty -> counted as a miss, not skipped
+            per_instance[iid] = {"selected_tid": None, "resolved": False}
+            outcomes.append(0.0)
+            continue
+        tid = tids[sel]
+        resolved = bool(evals[iid][tid])
+        per_instance[iid] = {"selected_tid": tid, "resolved": resolved}
+        outcomes.append(1.0 if resolved else 0.0)
+    return {
+        "selector": "majority normalized-patch signature (self-consistency)",
+        "n_instances": len(outcomes),
+        "selected_pass_at_1": (round(float(np.mean(outcomes)), 4)
+                               if outcomes else None),
+        "per_instance": per_instance,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -295,11 +401,14 @@ def main() -> None:
     p.add_argument("--out", default=None, help="Write the full result JSON here.")
     args = p.parse_args()
 
-    table_a = per_instance_table(load_predictions(args.predictions), load_eval(args.eval))
+    preds_a = load_predictions(args.predictions)
+    table_a = per_instance_table(preds_a, load_eval(args.eval))
     set_valued_a = set_valued_evidence(args.predictions, args.eval)
+    selected_a = selected_pass_at_1(args.predictions, args.eval)
     report = {args.label_a: {"summary": summarize(table_a, args.seed),
                              "per_instance": table_a,
-                             "set_valued_instances": set_valued_a}}
+                             "set_valued_instances": set_valued_a,
+                             "selected_pass_at_1": selected_a}}
 
     print(f"\n=== {args.label_a} ===  ({report[args.label_a]['summary']['n_instances']} instances)")
     for k, v in report[args.label_a]["summary"].items():
@@ -307,22 +416,37 @@ def main() -> None:
             print(f"  {k}: {v['mean']}  CI95={v['ci95']}")
     print(f"  set-valued (>=2 distinct passing patches): {len(set_valued_a)} instance(s) "
           f"{[s['instance_id'] for s in set_valued_a]}")
+    print(f"  selected-pass@1 (majority signature): {selected_a['selected_pass_at_1']}")
 
     if args.compare_predictions and args.compare_eval:
-        table_b = per_instance_table(load_predictions(args.compare_predictions),
-                                     load_eval(args.compare_eval))
-        report[args.label_b] = {"summary": summarize(table_b, args.seed), "per_instance": table_b}
+        preds_b = load_predictions(args.compare_predictions)
+        table_b = per_instance_table(preds_b, load_eval(args.compare_eval))
+        selected_b = selected_pass_at_1(args.compare_predictions, args.compare_eval)
+        report[args.label_b] = {"summary": summarize(table_b, args.seed),
+                                "per_instance": table_b,
+                                "selected_pass_at_1": selected_b}
         print(f"\n=== {args.label_b} ===  ({report[args.label_b]['summary']['n_instances']} instances)")
         for k, v in report[args.label_b]["summary"].items():
             if k != "n_instances":
                 print(f"  {k}: {v['mean']}  CI95={v['ci95']}")
+        print(f"  selected-pass@1 (majority signature): {selected_b['selected_pass_at_1']}")
 
         entropy = load_entropy(args.results_dir, set(table_a) | set(table_b))
-        comp = compare(table_a, table_b, entropy, args.seed, args.entropy_split)
+        comp = compare(table_a, table_b, entropy, args.seed, args.entropy_split,
+                       preds_a=preds_a, preds_b=preds_b)
         report["comparison"] = comp
         g = comp["diverse_pass_at_k_gain"]
         print(f"\n=== {args.label_a} − {args.label_b} ===")
-        print(f"  diverse-pass@k gain: {g['mean']}  CI95={g['ci95']}  (n={comp['n_shared_instances']})")
+        print(f"  diverse-pass@k* gain (metric-time matched k): {g['mean']}  "
+              f"CI95={g['ci95']}  (n={comp['n_compared_instances']})")
+        print(f"  exact paired sign-flip p: {comp['paired_sign_flip_p']}")
+        if comp["k_mismatch_instances"]:
+            print(f"  WARNING — per-instance k mismatch on "
+                  f"{len(comp['k_mismatch_instances'])} instance(s); compared at "
+                  f"k*=min(k_a,k_b): {comp['k_mismatch_instances']}")
+        if "rarefied_distinct_gain" in comp:
+            r = comp["rarefied_distinct_gain"]
+            print(f"  rarefied distinct-patch gain @k*: {r['mean']}  CI95={r['ci95']}")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]

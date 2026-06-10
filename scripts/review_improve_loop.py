@@ -252,8 +252,13 @@ def run_claude(
     exe: str, prompt: str, *, model: str, max_turns: int, permission_mode: str,
     timeout: int, resume_session: str | None,
 ) -> dict:
-    """Invoke `claude -p` with JSON output. Returns a normalized result dict."""
-    cmd = [exe, "-p", prompt, "--output-format", "json",
+    """Invoke `claude -p` with JSON output. Returns a normalized result dict.
+
+    The prompt is passed via STDIN, not argv: Windows CreateProcess caps the
+    command line at ~32K chars, and large prompts (e.g. the spec-critic's
+    before/after rubric) exceed it (WinError 206).
+    """
+    cmd = [exe, "-p", "--output-format", "json",
            "--model", model, "--max-turns", str(max_turns)]
     if permission_mode == "bypass":
         cmd.append("--dangerously-skip-permissions")
@@ -264,7 +269,7 @@ def run_claude(
 
     try:
         proc = subprocess.run(
-            cmd, cwd=PROJECT_ROOT, capture_output=True, text=True,
+            cmd, cwd=PROJECT_ROOT, capture_output=True, text=True, input=prompt,
             encoding="utf-8", errors="replace", timeout=timeout, shell=False,
         )
     except subprocess.TimeoutExpired:

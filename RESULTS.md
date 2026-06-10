@@ -111,6 +111,38 @@ headline sweeps temperature **0.2 / 0.7 / 1.0**; vanilla samples at **T > 0** (T
 would be a deterministic strawman). Each (arm × temperature × clustering-strategy)
 writes a **separate results dir** so no run overwrites another's predictions.
 
+**Disclosure — what the knob touches in each arm.** In the treatment arms the
+temperature applies to the *diversity source* (the strategy proposer; the SDLG arm
+perturbs tokens directly) while post-branch execution stays greedy; in the vanilla
+arm the *whole agent* decodes at T (its only diversity source is base-agent
+sampling). The knob is matched, but it injects randomness into different amounts of
+text — that is inherent to comparing mechanism-driven vs sampling-driven diversity,
+and it is why the sweep includes vanilla's most favorable temperature (see the
+robustness row below) rather than trusting any single T.
+
+**Matching direction (which budget match, for which claim).** Branched trajectories
+share the SEARCH prefix (search runs once, then forks); vanilla resamples each pay
+the full search cost. At matched *trajectory* count the control therefore receives
+**at least as much** total compute as the treatment, so a treatment win at matched k
+cannot be attributed to a compute advantage — trajectory-matching is the
+*conservative* match for the headline coverage/diversity claim. A *token*-matched
+comparison (fewer vanilla trajectories) would favor the treatment and is **not**
+used. `scripts/budget_audit.py` reports per-arm token totals so the realized
+asymmetry is quantified, not assumed.
+
+**Pre-registered primary endpoint (multiple-comparison control).** The sweep ×
+arms × ablations grid has many cells; exactly ONE comparison is confirmatory, fixed
+before the GPU runs: **strategy-proposal (greedy clustering, τ=0 superset run) vs
+matched-k vanilla at T = 0.7**, metric = per-instance matched-k* `diverse-pass@k`
+gain, tested with the **exact paired sign-flip test** (n=10 → all 1024 sign
+patterns). T = 0.7 sits below the T≈0.9 knee where whole-agent decoding precision
+degrades (EntroPO Fig. 4), so the primary cannot manufacture a win out of vanilla
+decoding degradation at T = 1.0. All other cells (T = 0.2/1.0, SDLG arm, clustering
+and τ ablations, entropy strata) are **exploratory/descriptive**. One required
+robustness row: treatment (T = 0.7) vs vanilla at *its best* sweep temperature — if
+the headline gain survives only against vanilla's worst temperature, that is
+reported, not hidden.
+
 ### 2.3 Ablations
 
 - **Generator:** strategy-proposal vs SDLG, isolated (`diversity_method` is a single
@@ -118,11 +150,20 @@ writes a **separate results dir** so no run overwrites another's predictions.
 - **Clustering:** `greedy` (Farquhar/Kuhn Alg. 1) vs `connected` (order-independent
   transitive closure) vs `kernel` (Kernel Language Entropy, Nikitin 2024). τ is
   **not transferable** to `kernel` (different scale) and is recalibrated per strategy.
-- **τ / entropy-gate sensitivity (R3.3):** sweep `--tau`; report branch-rate vs τ.
-  Both arms now read the **same** `entropy_threshold` key *and act on it identically*
-  — `strategy_proposal` collapses to the single dominant cluster when `entropy ≤ τ`,
-  mirroring the SDLG arm's early return (see `_propose_strategies`,
-  `phased_orchestrator.py`).
+- **τ / entropy-gate sensitivity (R3.3):** computed **post-hoc, at zero extra GPU
+  cost**, by `scripts/tau_sweep.py`. The τ=0 headline run produces the *superset* of
+  trajectories any τ>0 run would produce; the gate's no-branch action keeps exactly
+  the dominant-cluster representative, which already exists in the superset run
+  (trajectory *i* executes cluster *i*'s representative; post-branch execution is
+  greedy), so every τ is evaluable by trajectory subsetting. Both arms read the
+  **same** `entropy_threshold` key *and act on it identically* — `strategy_proposal`
+  collapses to the single dominant cluster when `entropy ≤ τ`, mirroring the SDLG
+  arm's early return (see `_propose_strategies`, `phased_orchestrator.py`).
+  **Stated plainly:** with N=5 candidates, discrete semantic entropy is
+  *partition-quantized* — it takes exactly 7 values {0, 0.500, 0.673, 0.950, 1.055,
+  1.332, 1.609} nats — so τ at this N is a **cluster-partition-shape rule**, not a
+  continuous dial (τ=0 ≡ "branch iff ≥2 clusters"). The sweep grid is exactly the
+  achievable set; the paper says this rather than implying a smooth threshold.
 
 ### 2.4 Documented deviations from the reference methods (R1.1)
 
@@ -165,16 +206,33 @@ All metrics are pure post-processing over the predictions/eval artifacts
 
 - **Coverage — `diverse-pass@k`** via the **unbiased Chen et al. (2021)** estimator on
   *both* arms at matched k. Framed honestly as an **oracle upper bound**, not
-  deployable accuracy.
+  deployable accuracy. **Matched k is enforced at metric time, not only at run
+  time:** `compare()` evaluates both arms at the common per-instance
+  k\* = min(k_treatment, k_vanilla) via the Chen estimator and reports any
+  k-mismatched instances — a failed resample or `--max-k` cap can therefore never
+  silently hand the larger arm a mechanical any-pass advantage.
 - **Diversity measured INDEPENDENTLY of the branching signal (R4.2).** We do **not**
   reuse the DeBERTa-NLI clustering that *decided* branching (circular). Diversity of the
   **final patches** is structural: exact-signature **distinct-patch count** + graded
   **mean pairwise edit distance** (`difflib`) over normalized diff bodies. Measured on
   **final** patches, not proposal-time branches (which can converge downstream, R4.3).
-- **Selection-aware accuracy (R4.4, strengthening):** a selector (majority cluster /
-  regression tests) → `selected-pass@1`, so we do not overclaim the oracle number.
+  Cross-arm distinct-count differences at unequal k use the **rarefaction estimator**
+  `expected_distinct_at_k` (expected #distinct in a random k\*-subset — the same
+  hypergeometric identity as Chen) because raw distinct counts rise mechanically with
+  sample size; mean pairwise distance needs no correction (expected subset mean =
+  full mean, by pair-inclusion symmetry).
+- **Selection-aware accuracy (R4.4) — implemented:** `selected-pass@1` under the
+  **majority normalized-patch-signature selector** (self-consistency over final
+  patches; ties → earliest seen; empty patches never win; all-empty counts as a
+  miss). Deployable by construction — it reads only the predictions artifacts, no
+  hidden tests, no NLI — so the oracle row is never presented alone
+  (`scripts/compute_metrics.py::selected_pass_at_1`).
 - **Uncertainty (R6.1):** every headline number carries a **bootstrap CI** over
-  instances (`bootstrap_ci`, seeded for reproducibility).
+  instances (`bootstrap_ci`, seeded for reproducibility), and the primary endpoint
+  additionally carries the **exact paired sign-flip p-value**
+  (`paired_permutation_pvalue`: all 2^n sign patterns at n ≤ 20) — at n = 10 the
+  exact test is the trustworthy inference; the percentile bootstrap over lumpy 0/1
+  gains is reported as a companion interval, not the decision rule.
 
 ---
 
@@ -207,10 +265,12 @@ Reproduce per arm, then compute. **No numbers are filled in until the runs execu
 do not infer values from these placeholders.
 
 ```bash
-# Treatment (strategy-proposal), T=0.7, greedy clustering:
+# Treatment (strategy-proposal), T=0.7 (the pre-registered primary T — passed
+# EXPLICITLY so the proposer temperature provably matches the vanilla arm, R2.4):
 python scripts/run_branching.py --config configs/branching.yaml \
-    --results-dir results/strategy_t0.7 --clustering-strategy greedy
-# Matched-k vanilla control at the same temperature:
+    --results-dir results/strategy_t0.7 --clustering-strategy greedy \
+    --temperature 0.7
+# Matched-k vanilla control at the SAME temperature:
 python scripts/run_resample_baseline.py --treatment-dir results/strategy_t0.7 \
     --results-dir results/resample --temperatures 0.7
 # Metrics + R5 analysis:
@@ -224,6 +284,9 @@ python scripts/compute_metrics.py \
 python scripts/budget_audit.py --results-dir results/strategy_t0.7 \
     --eval results/strategy_t0.7 --reference-cap 250 \
     --out results/budget_audit_strategy_t0.7.json
+# Post-hoc tau sweep (R3.3/R5.5) — zero extra GPU runs, from the same artifacts:
+python scripts/tau_sweep.py --results-dir results/strategy_t0.7 \
+    --eval results/strategy_t0.7 --out results/tau_sweep_strategy_t0.7.json
 ```
 
 Per-arm token totals are summed from each trajectory's stored litellm response
@@ -238,10 +301,11 @@ cost calculation; tokens and steps are the compute proxies.
 
 | Metric (n=10 easy SymPy) | Matched-k vanilla | Strategy-proposal | SDLG |
 |---|---|---|---|
-| diverse-pass@k (Chen, oracle) ± CI | _pending_ | _pending_ | _pending_ |
-| distinct final patches ± CI | _pending_ | _pending_ | _pending_ |
+| diverse-pass@k\* (Chen, oracle) ± CI | _pending_ | _pending_ | _pending_ |
+| distinct final patches (rarefied @k\*) ± CI | _pending_ | _pending_ | _pending_ |
 | mean pairwise patch distance ± CI | _pending_ | _pending_ | _pending_ |
-| selected-pass@1 (majority cluster) | _pending_ | _pending_ | _pending_ |
+| selected-pass@1 (majority signature) | _pending_ | _pending_ | _pending_ |
+| primary gain: exact sign-flip p (T=0.7 only) | — | _pending_ | _exploratory_ |
 
 Gain (treatment − vanilla) with bootstrap CI, and the per-entropy-stratum / off-mode
 breakdown, are emitted by the same command into the `comparison` block of the output JSON.
@@ -288,7 +352,22 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    proposal's "helps more on harder problems" hypothesis is **untested** and is
    replaced by the entropy-stratification analysis (§4) within the easy band; all
    claims are scoped accordingly (threat 1).
-9. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
+9. **Entropy quantization & estimator bias at N=5.** With 5 candidates the discrete
+   semantic entropy takes only 7 partition-quantized values, the plug-in estimator is
+   biased low (Miller–Madow ≈ (K−1)/2N nats, up to ~0.4 nats at K=5), and the τ gate
+   is effectively a cluster-partition-shape rule. *Addressed:* the gate and strata
+   are defined on the plug-in value with N **held fixed** (n_strategies =
+   sdlg_n_alternatives = 5) across arms and instances, so within-experiment
+   comparisons are consistent; absolute entropy values are never interpreted across
+   different N; `scripts/tau_sweep.py` reports the achievable-τ grid explicitly.
+10. **Strata and off-mode candidates are descriptive at n=10.** A median split
+    leaves ~5 instances per entropy stratum, and a single "treatment passed, vanilla
+    0/k" instance can be sampling noise (P(0 of k) = (1−p)^k). *Addressed:* only the
+    pre-registered primary endpoint is confirmatory (exact sign-flip test); strata
+    (R5.2) and off-mode records (R5.4) are reported as descriptive evidence with both
+    arms' (k, n_resolved) attached, and off-mode claims require replication across
+    temperatures before being asserted.
+11. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
    (Fig. 5) shows prompting "give me a different answer" with prior answers in
    context recovers much diversity in open-ended NL. We do not run this arm;
    defenses: our setting is multi-turn and action-constrained, the strategy-proposal

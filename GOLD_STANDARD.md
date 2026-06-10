@@ -180,7 +180,14 @@ deviation from a paper is intentional and documented (not a bug).
   uses the phased `none` arm.
 - **R2.4 — Temperature-matched:** one `sample_temperature` knob drives both the
   proposer and the vanilla baseline; the headline runs a sweep (0.2/0.7/1.0).
-  Vanilla MUST sample at T>0 (temp=0 = deterministic = a strawman).
+  Vanilla MUST sample at T>0 (temp=0 = deterministic = a strawman). The documented
+  reproduction commands must set the temperature **explicitly on both arms** (a
+  treatment command that silently inherits a different config default than the
+  control's CLI temperature is an R2.4 violation). Arms are compared only at equal
+  T; additionally report ONE robustness row comparing the treatment against
+  vanilla's *best* sweep temperature, so a win cannot be an artifact of comparing
+  against vanilla at an unfavorable T (the knob touches the whole agent in the
+  vanilla arm but only the diversity source in the treatment arms — disclosed).
 - **R2.5 — Results isolation:** each arm/temperature/clustering-strategy writes a
   **separate results dir**; no run overwrites another's predictions.
 
@@ -192,8 +199,16 @@ deviation from a paper is intentional and documented (not a bug).
   stacked), each attributable.
 - **R3.2 — Clustering strategy:** greedy vs connected vs kernel, each into its own
   results dir; τ recalibrated for kernel (non-transferable scale, documented).
-- **R3.3 — τ / entropy-gate sensitivity:** at least a documented plan or a run
-  showing branch-rate vs τ.
+- **R3.3 — τ / entropy-gate sensitivity:** evaluated **post-hoc from the τ=0
+  superset run** by a runnable script (no separate GPU runs needed): the gate's
+  no-branch action keeps exactly the dominant-cluster representative trajectory,
+  which exists in the superset run and executed greedily, so every τ is evaluable
+  by trajectory subsetting (branch-rate, trajectories used, gated pass-rate per τ).
+  The analysis MUST disclose the entropy quantization plainly: at N candidates the
+  discrete entropy takes only partition-of-N values (7 values at N=5), so τ is a
+  cluster-partition-shape rule at small N, and the admissible τ grid is the
+  achievable-entropy set, not a continuous dial. N must be held fixed across arms
+  and instances for τ/strata comparability (plug-in entropy bias varies with K, N).
 
 *Pass:* each ablation either has results, or is explicitly de-scoped in the
 writeup with justification.
@@ -204,17 +219,27 @@ writeup with justification.
 
 - **R4.1 — Coverage:** `diverse-pass@k` computed with the **unbiased Chen et al.
   (2021) estimator** on *both* arms, at matched k. Oracle/coverage framing stated
-  honestly (it is an upper bound, not deployable accuracy).
+  honestly (it is an upper bound, not deployable accuracy). **Matched k must be
+  enforced at METRIC time, not only at run time:** the two-arm comparison evaluates
+  both arms at the common per-instance k\* = min(k_A, k_B) via the Chen estimator
+  and reports every k-mismatched instance — failed resamples, `--max-k` caps, or
+  capture losses must never silently hand the larger arm a mechanical any-pass
+  advantage.
 - **R4.2 — Diversity measured INDEPENDENTLY of the branching signal.** The
   diversity of the final outputs must NOT be measured with the same DeBERTa-NLI
   clustering used to *decide* branching (circular). Use an independent metric over
   **final patches** — structural/AST or normalized edit distance, and/or
   behavioral diversity — reported as distinct-solution counts per arm. This metric
-  must exist as a runnable script over the predictions artifacts.
+  must exist as a runnable script over the predictions artifacts. Cross-arm
+  distinct-count differences at unequal sample counts must use a rarefaction
+  estimator (expected distinct in a random k\*-subset) — raw distinct counts rise
+  mechanically with sample size.
 - **R4.3 — Diversity measured on FINAL patches, not proposal-time branches**
   (branches can converge downstream).
-- **R4.4 (strengthening, not blocker) — Selection-aware accuracy:** a selector
-  (majority cluster / regression tests) → `selected-pass@1`, so the paper does not
+- **R4.4 (strengthening, not blocker) — Selection-aware accuracy:** a *deployable*
+  selector — one computable from the run artifacts alone (e.g. majority vote over
+  normalized final-patch signatures with deterministic tie-breaks), no hidden
+  tests, no oracle — → `selected-pass@1` on both arms, so the paper does not
   overclaim the oracle number.
 
 ---
@@ -263,10 +288,22 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 ## 6. Statistical rigor & honest scope  `[BLOCKER]`
 
 - **R6.1 — Uncertainty:** every headline number carries a confidence interval
-  (bootstrap over instances acceptable); no point estimates without spread.
+  (bootstrap over instances acceptable); no point estimates without spread. The
+  primary arm-vs-arm gain additionally carries an **exact paired sign-flip
+  (permutation) p-value** — at n ≤ 20 all 2^n sign patterns are enumerable, and at
+  this project's n=10 the exact test, not a percentile bootstrap over lumpy 0/1
+  gains, is the decision-grade inference.
 - **R6.2 — Scope claims match the data:** claims are scoped to the instance set
   actually run (currently 10 easy SymPy; goal: full SWE-bench Lite). No
   generalization beyond what was measured.
+- **R6.5 — Pre-registered primary endpoint (multiple-comparison control):** the
+  sweep × arms × ablations grid is many cells; exactly ONE comparison is named
+  confirmatory *before* the GPU runs (currently: strategy-proposal, greedy, τ=0
+  superset vs matched-k vanilla at T=0.7, matched-k\* diverse-pass@k gain, exact
+  sign-flip test). Every other cell — temperatures, SDLG, clustering/τ ablations,
+  entropy strata, off-mode candidates — is labeled exploratory/descriptive in the
+  writeup. Changing the primary after seeing results is forbidden; if the runs
+  motivate a different primary, that is reported as a post-hoc finding.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
   manufacture wins), and per-arm token/compute accounting reported.

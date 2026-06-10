@@ -20,6 +20,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 import litellm
 
+from src.agent.branching_defaults import cfg
 from src.agent.phased_orchestrator import PhasedOrchestrator
 from src.diversity.nli_client import NLIClient
 from src.evaluation.dataset import (
@@ -111,7 +112,7 @@ def vanilla_samples_at_temperature(model_config: dict, branching_config: dict) -
         return model_config
     mc = copy.deepcopy(model_config)
     mc.setdefault("model_kwargs", {})["temperature"] = \
-        branching_config.get("sample_temperature", 1.0)
+        cfg(branching_config, "sample_temperature")
     return mc
 
 

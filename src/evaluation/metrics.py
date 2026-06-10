@@ -99,12 +99,66 @@ def distinct_patch_count(patches: Sequence[str]) -> int:
     return len(sigs)
 
 
+def expected_distinct_at_k(patches: Sequence[str], k: int) -> float:
+    """Rarefaction: expected #distinct non-empty signatures in a random k-subset.
+
+    When two arms produced different numbers of trajectories, comparing raw
+    distinct counts is biased toward the larger arm (distinct count rises
+    mechanically with sample size). The unbiased fix is the classic rarefaction
+    estimator: for a uniform random k-subset of the n trajectories,
+    E[#distinct] = sum_sig P(>=1 trajectory with that signature is drawn)
+                 = sum_sig pass_at_k(n, m_sig, k)
+    using the same hypergeometric identity as the Chen estimator, where m_sig is
+    the signature's multiplicity. Empty patches stay in n (they are draws that
+    contribute no signature). With k == n this equals distinct_patch_count.
+    """
+    n = len(patches)
+    if n == 0 or k <= 0:
+        return 0.0
+    k = min(k, n)
+    counts: dict[str, int] = {}
+    for p in patches:
+        sig = patch_signature(p)
+        if sig:
+            counts[sig] = counts.get(sig, 0) + 1
+    return float(sum(pass_at_k(n, m, k) for m in counts.values()))
+
+
+def select_majority_patch(patches: Sequence[str]) -> int | None:
+    """Deployable selector (R4.4): index of the majority-signature patch.
+
+    Self-consistency over FINAL patches: pick the normalized signature with the
+    highest multiplicity (the modal solution), and return the index of its first
+    occurrence. Ties break to the signature seen earliest (deterministic).
+    Empty patches never win. Returns None if every patch is empty.
+
+    Uses only the predictions artifacts — no NLI, no test execution — so it is
+    a genuinely deployable selection rule, not an oracle.
+    """
+    counts: dict[str, int] = {}
+    first_idx: dict[str, int] = {}
+    for i, p in enumerate(patches):
+        sig = patch_signature(p)
+        if not sig:
+            continue
+        counts[sig] = counts.get(sig, 0) + 1
+        first_idx.setdefault(sig, i)
+    if not counts:
+        return None
+    best = max(counts, key=lambda s: (counts[s], -first_idx[s]))
+    return first_idx[best]
+
+
 def mean_pairwise_distance(patches: Sequence[str]) -> float:
     """Mean pairwise structural distance in [0,1] over non-empty patches.
 
     distance(a,b) = 1 - difflib ratio on the normalized bodies. Graded companion
     to the exact distinct count: 0.0 when all (non-empty) patches are identical,
     →1.0 when they share nothing. Returns 0.0 if fewer than two non-empty patches.
+
+    Unlike the distinct count, this needs NO rarefaction correction at unequal
+    k: every pair is equally likely to appear in a uniform random k-subset, so
+    the expected subset mean equals the full-sample mean (linearity).
     """
     norms = [n for n in (normalize_patch(p) for p in patches) if n]
     if len(norms) < 2:
@@ -120,6 +174,46 @@ def mean_pairwise_distance(patches: Sequence[str]) -> float:
 # --------------------------------------------------------------------------- #
 # Uncertainty (across-instance spread)
 # --------------------------------------------------------------------------- #
+
+def paired_permutation_pvalue(
+    gains: Sequence[float],
+    n_resamples: int = 20000,
+    seed: int = 0,
+) -> float | None:
+    """Two-sided paired sign-flip (permutation) test on per-instance gains.
+
+    H0: the per-instance gain distribution is symmetric about 0 (no arm
+    difference). Test statistic: |mean(gain)|. For n <= 20 the test is EXACT —
+    all 2^n sign assignments are enumerated — which matters at this project's
+    n = 10, where a percentile bootstrap over lumpy 0/1 gains is unreliable.
+    Larger n falls back to seeded Monte Carlo sign-flips.
+
+    Returns the p-value, or None for empty input. All-zero gains return 1.0
+    (no evidence of any difference, trivially).
+    """
+    arr = np.asarray(gains, dtype=float)
+    n = arr.size
+    if n == 0:
+        return None
+    observed = abs(arr.mean())
+    if n <= 20:
+        # Exact enumeration of all sign patterns via bit masks.
+        count = 0
+        total = 1 << n
+        for mask in range(total):
+            signs = np.fromiter(
+                ((1.0 if mask >> i & 1 else -1.0) for i in range(n)),
+                dtype=float, count=n,
+            )
+            if abs((signs * arr).mean()) >= observed - 1e-12:
+                count += 1
+        return count / total
+    rng = np.random.default_rng(seed)
+    signs = rng.choice([-1.0, 1.0], size=(n_resamples, n))
+    stats = np.abs((signs * arr).mean(axis=1))
+    # +1 correction keeps the Monte Carlo p-value valid (never exactly 0).
+    return float((np.sum(stats >= observed - 1e-12) + 1) / (n_resamples + 1))
+
 
 def bootstrap_ci(
     values: Sequence[float],

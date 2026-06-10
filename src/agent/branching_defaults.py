@@ -12,8 +12,13 @@ BRANCHING_DEFAULTS: dict = {
     "diversity_method": "strategy_proposal",  # {"strategy_proposal","sdlg","none"}
     "n_strategies": 5,
     # Shared sampling temperature for the proposer AND the vanilla resample
-    # baseline, so the arms differ only in the branching mechanism.
-    "sample_temperature": 1.0,
+    # baseline, so the arms differ only in the branching mechanism. 0.7 is the
+    # PRE-REGISTERED PRIMARY-ENDPOINT temperature: below the T~0.9 knee where
+    # whole-agent decoding precision degrades (EntroPO Fig. 4) — the vanilla
+    # arm decodes its ENTIRE agent at this T, so running the primary at 1.0
+    # would risk manufacturing a treatment win out of vanilla format/precision
+    # degradation rather than mode collapse. 0.2/1.0 are exploratory sweep arms.
+    "sample_temperature": 0.7,
 
     # Clustering / branching gate.
     "clustering_strategy": "greedy",          # {"greedy","connected","kernel"}

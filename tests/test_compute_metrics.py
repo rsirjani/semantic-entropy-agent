@@ -122,6 +122,76 @@ def test_set_valued_evidence_none_when_single_passing(tmp_path):
     assert cm.set_valued_evidence(str(p), str(d)) == []
 
 
+def test_compare_enforces_matched_k_at_metric_time(tmp_path):
+    """A k mismatch (e.g. a failed resample) must be compared at k*=min(k_a,k_b)
+    via the Chen estimator, not silently at each arm's own k."""
+    dA, dB = tmp_path / "ekA", tmp_path / "ekB"
+    dA.mkdir(); dB.mkdir()
+    # Treatment: 4 trajectories, 1 passes. Vanilla: only 2 completed, 1 passes.
+    _write_eval(str(dA), "i1", [True, False, False, False])
+    _write_eval(str(dB), "i1", [True, False])
+    pA, pB = tmp_path / "pkA.jsonl", tmp_path / "pkB.jsonl"
+    _write_predictions(pA, [{"instance_id": "i1", "model_patch": f"+a{i}",
+                             "trajectory_id": f"t{i}"} for i in range(4)])
+    _write_predictions(pB, [{"instance_id": "i1", "model_patch": f"+b{i}",
+                             "trajectory_id": f"t{i}"} for i in range(2)])
+    ta = cm.per_instance_table(cm.load_predictions(str(pA)), cm.load_eval(str(dA)))
+    tb = cm.per_instance_table(cm.load_predictions(str(pB)), cm.load_eval(str(dB)))
+    comp = cm.compare(ta, tb, entropy={}, seed=0, split=None)
+    # k* = 2: treatment pass@2(n=4,c=1) = 1 - C(3,2)/C(4,2) = 0.5; vanilla
+    # pass@2(n=2,c=1) = 1.0. Naive own-k comparison would say 1.0 - 1.0 = 0.
+    assert abs(comp["diverse_pass_at_k_gain"]["mean"] - (-0.5)) < 1e-9
+    mm = comp["k_mismatch_instances"]
+    assert len(mm) == 1 and mm[0]["compared_at_k"] == 2 and not mm[0]["skipped"]
+
+
+def test_compare_reports_sign_flip_p_and_rarefied_distinct(tmp_path):
+    dA, dB = tmp_path / "erA", tmp_path / "erB"
+    dA.mkdir(); dB.mkdir()
+    for iid in ("i1", "i2"):
+        _write_eval(str(dA), iid, [True, False])
+        _write_eval(str(dB), iid, [False, False])
+    pA, pB = tmp_path / "prA.jsonl", tmp_path / "prB.jsonl"
+    # Treatment: 2 distinct patches/instance; vanilla: collapsed (identical twice).
+    _write_predictions(pA, [
+        {"instance_id": i, "model_patch": f"@@ -1 +1 @@\n+{i}_v{j}=1\n",
+         "trajectory_id": f"t{j}"} for i in ("i1", "i2") for j in range(2)])
+    _write_predictions(pB, [
+        {"instance_id": i, "model_patch": "@@ -1 +1 @@\n+same=1\n",
+         "trajectory_id": f"t{j}"} for i in ("i1", "i2") for j in range(2)])
+    preds_a, preds_b = cm.load_predictions(str(pA)), cm.load_predictions(str(pB))
+    ta = cm.per_instance_table(preds_a, cm.load_eval(str(dA)))
+    tb = cm.per_instance_table(preds_b, cm.load_eval(str(dB)))
+    comp = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                      preds_a=preds_a, preds_b=preds_b)
+    # Two paired gains of +1 -> exact sign-flip p = 2/4 = 0.5.
+    assert abs(comp["paired_sign_flip_p"] - 0.5) < 1e-9
+    # Rarefied distinct gain at k*=2: treatment 2 distinct, vanilla 1 -> +1.
+    assert abs(comp["rarefied_distinct_gain"]["mean"] - 1.0) < 1e-9
+
+
+def test_selected_pass_at_1_majority_signature(tmp_path):
+    d = tmp_path / "esel"
+    d.mkdir()
+    # Majority signature (t0,t1 identical edit) FAILS; the distinct t2 passes.
+    # Selector must pick the majority (deployable, no oracle) -> miss.
+    with open(os.path.join(str(d), "trajectory_eval_i1.json"), "w", encoding="utf-8") as f:
+        json.dump({"instance_id": "i1", "trajectories": [
+            {"trajectory_id": "t0", "resolved": False},
+            {"trajectory_id": "t1", "resolved": False},
+            {"trajectory_id": "t2", "resolved": True},
+        ]}, f)
+    p = tmp_path / "psel.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+x=1\n", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "@@ -9 +9 @@\n+x=1\n", "trajectory_id": "t1"},
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+y=2\n", "trajectory_id": "t2"},
+    ])
+    out = cm.selected_pass_at_1(str(p), str(d))
+    assert out["per_instance"]["i1"]["selected_tid"] == "t0"
+    assert out["selected_pass_at_1"] == 0.0   # honest: majority missed the fix
+
+
 def test_load_entropy_from_phased_decisions_log(tmp_path):
     iid = "sympy__sympy-1"
     inst_dir = tmp_path / iid

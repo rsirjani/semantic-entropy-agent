@@ -5,8 +5,9 @@ import math
 import pytest
 
 from src.evaluation.metrics import (
-    bootstrap_ci, distinct_patch_count, diverse_pass_at_k, mean_pairwise_distance,
-    normalize_patch, pass_at_k, patch_signature,
+    bootstrap_ci, distinct_patch_count, diverse_pass_at_k, expected_distinct_at_k,
+    mean_pairwise_distance, normalize_patch, paired_permutation_pvalue, pass_at_k,
+    patch_signature, select_majority_patch,
 )
 
 
@@ -74,6 +75,56 @@ def test_mean_pairwise_distance_bounds():
         "@@ -1 +1 @@\n+zeta_completely_different()\n",
     ])
     assert 0.0 < d <= 1.0
+
+
+PATCH_A = "@@ -1 +1 @@\n+x = 1\n"
+PATCH_B = "@@ -1 +1 @@\n+y = 2\n"
+PATCH_C = "@@ -1 +1 @@\n+z = 3\n"
+
+
+def test_expected_distinct_at_k_full_k_equals_exact_count():
+    patches = [PATCH_A, PATCH_A, PATCH_B, "", PATCH_C]
+    assert math.isclose(expected_distinct_at_k(patches, len(patches)),
+                        distinct_patch_count(patches))
+
+
+def test_expected_distinct_at_k_all_unique_equals_k():
+    # All multiplicities 1 -> E[distinct in k draws] = sum k/n over sigs = k.
+    patches = [PATCH_A, PATCH_B, PATCH_C]
+    assert math.isclose(expected_distinct_at_k(patches, 2), 2.0)
+    assert math.isclose(expected_distinct_at_k(patches, 1), 1.0)
+
+
+def test_expected_distinct_at_k_monotone_and_below_exact():
+    patches = [PATCH_A, PATCH_A, PATCH_A, PATCH_B]   # collapsed arm: 2 distinct
+    e1 = expected_distinct_at_k(patches, 1)
+    e2 = expected_distinct_at_k(patches, 2)
+    e4 = expected_distinct_at_k(patches, 4)
+    assert e1 < e2 < e4
+    assert math.isclose(e4, 2.0)                     # full sample = exact count
+    assert expected_distinct_at_k([], 3) == 0.0
+
+
+def test_paired_permutation_pvalue_known_cases():
+    # All-zero gains: no difference, p = 1.
+    assert paired_permutation_pvalue([0.0, 0.0, 0.0]) == 1.0
+    # n=2, gains (1,1): patterns (+,+),(+,-),(-,+),(-,-) -> |mean| in {1,0,0,1};
+    # |stat|>=1 for 2 of 4 -> p=0.5.
+    assert math.isclose(paired_permutation_pvalue([1.0, 1.0]), 0.5)
+    # Consistent positive gains at n=10 -> smallest achievable two-sided p = 2/1024.
+    p = paired_permutation_pvalue([1.0] * 10)
+    assert math.isclose(p, 2 / 1024)
+    assert paired_permutation_pvalue([]) is None
+
+
+def test_select_majority_patch_majority_ties_and_empties():
+    # Majority signature wins regardless of position.
+    assert select_majority_patch([PATCH_B, PATCH_A, PATCH_A]) == 1
+    # Tie -> earliest-seen signature's first occurrence.
+    assert select_majority_patch([PATCH_B, PATCH_A]) == 0
+    # Empty patches never win; all-empty -> None.
+    assert select_majority_patch(["", PATCH_A, ""]) == 1
+    assert select_majority_patch(["", "   "]) is None
 
 
 def test_bootstrap_ci_deterministic_and_edge_cases():
