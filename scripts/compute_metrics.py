@@ -317,6 +317,21 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
     # results table can show each arm's diversity at the common k*, not only
     # the difference.
     if preds_a is not None and preds_b is not None:
+        # Verify, don't assume: the eval record is BUILT from the predictions
+        # file, so the two must agree on every instance's draw count. A
+        # disagreement means desynced artifacts (e.g. an arm re-run after its
+        # eval, or a partial eval) — the H1 loop below would silently take
+        # min() over inconsistent denominators while H2 used the eval k.
+        # Name the instances instead of absorbing them.
+        count_mismatch = [
+            {"instance_id": i,
+             "predictions_n_a": len(preds_a.get(i, [])), "eval_k_a": table_a[i]["k"],
+             "predictions_n_b": len(preds_b.get(i, [])), "eval_k_b": table_b[i]["k"]}
+            for i in usable
+            if len(preds_a.get(i, [])) != table_a[i]["k"]
+            or len(preds_b.get(i, [])) != table_b[i]["k"]
+        ]
+        result["pred_eval_count_mismatch"] = count_mismatch
         rare_diffs, rare_a, rare_b = [], [], []
         ne_diffs, ne_frac_a, ne_frac_b = [], [], []
         for i in usable:
@@ -582,6 +597,11 @@ def main() -> None:
             print(f"  WARNING — per-instance k mismatch on "
                   f"{len(comp['k_mismatch_instances'])} instance(s); compared at "
                   f"k*=min(k_a,k_b): {comp['k_mismatch_instances']}")
+        if comp.get("pred_eval_count_mismatch"):
+            print(f"  WARNING — predictions/eval artifacts disagree on draw "
+                  f"count for {len(comp['pred_eval_count_mismatch'])} "
+                  f"instance(s) (desynced artifacts — re-run the eval): "
+                  f"{comp['pred_eval_count_mismatch']}")
         if "rarefied_distinct_gain" in comp:
             r = comp["rarefied_distinct_gain"]
             print(f"  [H1/diversity] rarefied distinct-patch gain @k*: {r['mean']}  "

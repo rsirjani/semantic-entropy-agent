@@ -17,6 +17,21 @@ Metric-correctness contract (R4.1/R7.2 — this file is the producer of the
      treatment's eval files (R2.5 results isolation).
   3. The best-of "primary" prediction row (null trajectory_id) is normalized to
      trajectory_id "primary" so the metric layer's primary-drop rule sees it.
+  4. EVAL-OUTCOME INTEGRITY: every `resolved` is a genuine harness verdict.
+     The swebench harness swallows ALL per-instance errors (patch-apply
+     failure, test timeout, Docker/build flakes) and simply writes no
+     report.json. A missing report is therefore classified from the harness's
+     own logs: patch-apply failure and test timeout are attributable to the
+     PATCH and recorded as failed draws (with `fail_reason`); any other cause
+     is an infrastructure error -> the driver exits nonzero WITHOUT writing
+     the eval record, so a Docker flake can never be silently scored as a
+     test failure (and then frozen forever by the resume-marker skip).
+  5. STALE-REPORT IMMUNITY: the harness returns an existing report.json keyed
+     by (run_id, model, instance) WITHOUT re-evaluating — patch content is not
+     part of its key. Eval run_ids therefore embed a content hash of the patch
+     (`patch_run_id`), so a re-run with a changed patch gets a fresh verdict
+     while an identical patch legitimately reuses its cached report (which
+     also makes the retry after an infra stop cheap).
 
 Usage:
     python scripts/eval_all_trajectories.py --results-dir results/strategy_t0.7 \
@@ -25,6 +40,7 @@ Usage:
         --instance sympy__sympy-12481
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -38,6 +54,73 @@ if sys.platform == "win32":
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
+
+# swebench.harness.constants.APPLY_PATCH_FAIL — inlined so the pure helpers
+# stay importable without the harness (which needs the Unix `resource` module).
+APPLY_PATCH_FAIL_MARKER = ">>>>> Patch Apply Failed"
+# Written by the harness on a test-script timeout (run_evaluation.py appends
+# "Timeout error: <N> seconds exceeded." to test_output.txt and raises
+# EvaluationError "Test timed out after <N> seconds" into run_instance.log).
+TIMEOUT_MARKERS = ("Timeout error:", "Test timed out after")
+
+
+class EvalOutcomeError(RuntimeError):
+    """The harness produced no report for a reason NOT attributable to the patch.
+
+    Recording such a trajectory as `resolved: false` would silently corrupt the
+    Chen estimator's (n, c) — an eval-time Docker/build flake is a MEASUREMENT
+    failure, not a failed draw (the patch exists and has a definite ground-truth
+    verdict). The driver must stop loudly instead of writing the record.
+    """
+
+
+def patch_run_id(arm_slug: str, trajectory_id: str, patch: str) -> str:
+    """Harness run_id for one patch — keyed by CONTENT, not just trajectory.
+
+    The swebench harness returns an existing report.json for (run_id, model,
+    instance) without re-evaluating, and patch content is not part of its key.
+    A patch-blind run_id would therefore let a re-run (treatment re-generated,
+    same trajectory_id, different patch) silently inherit the previous patch's
+    verdict. Embedding a short content hash makes the cache exact: identical
+    patch -> legitimate reuse; changed patch -> fresh evaluation.
+    """
+    digest = hashlib.sha1((patch or "").encode("utf-8")).hexdigest()[:10]
+    return f"{arm_slug}_traj_{trajectory_id}_{digest}"
+
+
+def classify_missing_report(log_dir: str) -> str:
+    """Classify a missing report.json from the harness's own logs.
+
+    Returns a genuine-failure reason ("patch_apply_failed" | "test_timeout")
+    when the missing report is attributable to the patch itself, else raises
+    EvalOutcomeError (infrastructure: Docker/build/container flake, killed
+    run, ...). The two genuine cases are exactly the EvaluationErrors the
+    harness raises about the PATCH; everything else it swallows is about the
+    ENVIRONMENT and must not be scored.
+    """
+    def read(name: str) -> str:
+        fp = os.path.join(log_dir, name)
+        if os.path.isfile(fp):
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except OSError:
+                pass
+        return ""
+
+    instance_log = read("run_instance.log")
+    test_output = read("test_output.txt")
+    if APPLY_PATCH_FAIL_MARKER in instance_log:
+        return "patch_apply_failed"
+    if any(m in test_output for m in TIMEOUT_MARKERS) or \
+       any(m in instance_log for m in TIMEOUT_MARKERS):
+        return "test_timeout"
+    raise EvalOutcomeError(
+        f"no report.json and no patch-attributable failure marker under "
+        f"{log_dir} — eval infrastructure error (Docker daemon/image/container "
+        f"flake?). The trajectory's outcome is UNKNOWN, not 'failed'; inspect "
+        f"run_instance.log there, fix the environment, and re-run this "
+        f"instance (already-completed patches reuse their cached reports).")
 
 
 def load_latest_trajectories(predictions_path: str, instance_id: str) -> list[dict]:
@@ -114,6 +197,8 @@ def propagate_duplicate_results(
         rep = evaluated[patch]
         row = {"trajectory_id": tid, "resolved": rep["resolved"],
                "patch_len": len(patch)}
+        if "fail_reason" in rep:
+            row["fail_reason"] = rep["fail_reason"]
         if rep["trajectory_id"] != tid:
             row["deduped_from"] = rep["trajectory_id"]
         results.append(row)
@@ -161,21 +246,30 @@ def eval_single_trajectory(
 
         # Check the report for pass/fail
         # Reports are at: logs/run_evaluation/{run_id}/{model_name}/{instance_id}/report.json
-        # (CWD-relative, matching where the swebench harness writes them.)
-        report_path = os.path.join(
+        # (CWD-relative, matching where the swebench harness writes them; the
+        # harness normalizes "/" in the model name to "__", so mirror that —
+        # otherwise a slash-bearing model id would make every report lookup
+        # miss and silently score the whole arm as failed.)
+        log_dir = os.path.join(
             "logs", "run_evaluation", run_id,
-            trajectory['model_name_or_path'],
+            trajectory["model_name_or_path"].replace("/", "__"),
             instance_id,
-            "report.json",
         )
-        resolved = False
+        report_path = os.path.join(log_dir, "report.json")
         if os.path.exists(report_path):
             with open(report_path) as rf:
                 report = json.load(rf)
-            inst_report = report.get(instance_id, {})
-            resolved = inst_report.get("resolved", False)
+            resolved = report.get(instance_id, {}).get("resolved", False)
+            return {"trajectory_id": tid, "resolved": resolved,
+                    "patch_len": len(trajectory["model_patch"])}
 
-        return {"trajectory_id": tid, "resolved": resolved, "patch_len": len(trajectory["model_patch"])}
+        # No report: the harness swallowed an error. Genuine (patch-attributable)
+        # failures are recorded as failed draws with their reason; anything else
+        # raises EvalOutcomeError so an infra flake is never scored as a failure.
+        reason = classify_missing_report(log_dir)
+        return {"trajectory_id": tid, "resolved": False,
+                "patch_len": len(trajectory["model_patch"]),
+                "fail_reason": reason}
 
     finally:
         os.unlink(temp_path)
@@ -230,17 +324,30 @@ def main():
         tid = t.get("trajectory_id") or "primary"
         print(f"  {tid:30s} {len(t['model_patch']):5d} chars")
 
-    # Evaluate each unique patch; run_id is arm-scoped so logs from different
-    # arms (strategy_t0.7, resample_t0.7, ...) never collide.
+    # Evaluate each unique patch; run_id is arm-scoped (no cross-arm log
+    # collisions) AND patch-content-keyed (no stale-report reuse after a
+    # re-run changes a trajectory's patch — see patch_run_id).
     arm_slug = os.path.basename(os.path.normpath(results_dir))
     evaluated: dict[str, dict] = {}
     for t in to_evaluate:
         tid = t.get("trajectory_id") or "primary"
-        run_id = f"{arm_slug}_traj_{tid}"
-        result = eval_single_trajectory(t, args.instance, run_id, args.timeout,
-                                        temp_dir=results_dir)
+        run_id = patch_run_id(arm_slug, tid, t["model_patch"])
+        try:
+            result = eval_single_trajectory(t, args.instance, run_id,
+                                            args.timeout, temp_dir=results_dir)
+        except EvalOutcomeError as e:
+            # Infrastructure failure: the outcome is UNKNOWN. Do NOT write the
+            # eval record (a written record would be skipped forever by the
+            # resume marker with a fabricated `resolved: false` inside) — exit
+            # nonzero so the campaign retries once and then stops loudly.
+            print(f"\nEVAL INFRASTRUCTURE ERROR on {args.instance} / {tid}:\n  {e}")
+            print("  trajectory_eval record NOT written; re-run after fixing "
+                  "the environment (completed patches reuse cached reports).")
+            sys.exit(3)
         evaluated[t["model_patch"]] = result
         status = "PASS" if result["resolved"] else "FAIL"
+        if result.get("fail_reason"):
+            status += f" ({result['fail_reason']})"
         print(f"  → {tid}: {status}")
 
     # Every genuine trajectory gets a result row (duplicates propagate, empty

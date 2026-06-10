@@ -174,9 +174,39 @@ def test_make_figures_renders_pngs(tmp_path):
             "distinct_patches": {"mean": 1.4, "ci95": [1.0, 2.0]},
             "mean_pairwise_distance": {"mean": 0.2, "ci95": [0.1, 0.35]},
         }},
-        "comparison": {"diverse_pass_at_k_gain": {"mean": 0.2}},  # must be ignored
+        # comparison WITHOUT rarefied levels -> no comparison figure rendered
+        "comparison": {"diverse_pass_at_k_gain": {"mean": 0.2}},
     }
     out = mf.make_figures(report, str(tmp_path / "figs"))
     assert len(out) == 3
     for p in out:
         assert os.path.isfile(p) and os.path.getsize(p) > 0
+
+
+def test_make_figures_renders_rarefied_comparison(tmp_path):
+    """R4.2 in the figures: cross-arm diversity must be shown rarefied at the
+    common k* (the raw per-arm distinct bars are own-k descriptives), with the
+    H1 inference and the H2 gate status carried onto the figure itself."""
+    summary = {
+        "n_instances": 10,
+        "diverse_pass_at_k": {"mean": 0.6, "ci95": [0.4, 0.8]},
+        "distinct_patches": {"mean": 3.2, "ci95": [2.1, 4.0]},
+        "mean_pairwise_distance": {"mean": 0.5, "ci95": [0.35, 0.65]},
+    }
+    report = {
+        "treatment": {"summary": dict(summary)},
+        "vanilla": {"summary": dict(summary)},
+        "comparison": {
+            "rarefied_distinct_at_k_star": {
+                "arm_a": {"mean": 3.1, "ci95": [2.2, 3.9]},
+                "arm_b": {"mean": 1.5, "ci95": [1.0, 2.1]},
+            },
+            "rarefied_distinct_gain": {"mean": 1.6, "paired_sign_flip_p": 0.002,
+                                       "min_achievable_p": 0.00195},
+            "confirmatory_family": {"H2_coverage": {"status": "confirmatory"}},
+        },
+    }
+    out = mf.make_figures(report, str(tmp_path / "figs"))
+    assert len(out) == 4
+    comp = [p for p in out if "rarefied_distinct_at_k_star" in p]
+    assert len(comp) == 1 and os.path.getsize(comp[0]) > 0

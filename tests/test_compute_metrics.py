@@ -98,6 +98,26 @@ def test_confirmatory_family_gate_open_and_closed():
     assert fam2["H2_coverage"]["status"].startswith("descriptive")
 
 
+def test_compare_names_pred_eval_count_mismatch():
+    """Verify-don't-assume at the metric layer: when the predictions file and
+    the eval record disagree on an instance's draw count (desynced artifacts —
+    e.g. an arm re-run after its eval), the comparison must NAME the instance
+    instead of silently min()-ing inconsistent denominators."""
+    iids = ["i0", "i1"]
+    ta, tb = _flat_table(iids, k=3), _flat_table(iids, k=3)
+    preds_a = {"i0": ["+a\n", "+b\n", "+c\n"], "i1": ["+a\n", "+b\n"]}  # i1: 2 != 3
+    preds_b = {i: ["+a\n", "+a\n", "+a\n"] for i in iids}
+    comp = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                      preds_a=preds_a, preds_b=preds_b)
+    mm = comp["pred_eval_count_mismatch"]
+    assert [m["instance_id"] for m in mm] == ["i1"]
+    assert mm[0]["predictions_n_a"] == 2 and mm[0]["eval_k_a"] == 3
+    # Consistent artifacts -> empty list, never absent.
+    comp2 = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                       preds_a=preds_b, preds_b=preds_b)
+    assert comp2["pred_eval_count_mismatch"] == []
+
+
 def test_load_eval_skips_primary_duplicate(tmp_path):
     """The best-of 'primary' row is excluded so matched-k n counts only genuine
     trajectories (consistent with load_predictions)."""

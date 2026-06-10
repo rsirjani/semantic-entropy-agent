@@ -283,7 +283,24 @@ All metrics are pure post-processing over the predictions/eval artifacts
   vanilla arm kept plain any-pass. Re-runs are safe end-to-end: the eval
   driver and the metric loaders both keep the **last** occurrence per
   (instance, trajectory), and entropy/partition parsers read the **last**
-  `STRATEGY PROPOSAL` block of the append-mode decisions log.
+  `STRATEGY PROPOSAL` block of the append-mode decisions log. Two
+  eval-outcome guarantees (iteration-11): (iii) **every `resolved` is a
+  genuine harness verdict** — the SWE-bench harness swallows all per-instance
+  errors (no report written, run continues), so a missing report is
+  classified from the harness logs: patch-apply failure and test timeout are
+  patch-attributable failed draws (recorded with `fail_reason`), while any
+  other cause (Docker/build/container flake) aborts the eval step **without
+  writing the record** (exit 3 → the campaign retries once, then stops
+  loudly) — an eval-time flake scored as a failure would silently corrupt the
+  Chen (n, c) and the resume marker would freeze it forever; (iv)
+  **stale-report immunity** — the harness reuses an existing `report.json`
+  keyed by (run_id, model, instance) *without re-evaluating*, so the eval
+  run id embeds a SHA-1 of the patch content (`patch_run_id`): a re-run with
+  a changed patch gets a fresh verdict, an identical patch legitimately
+  reuses its cached report (making post-stop retries cheap). The comparison
+  additionally reports `pred_eval_count_mismatch` — instances where the
+  predictions file and eval record disagree on the draw count (desynced
+  artifacts) — instead of silently `min()`-ing inconsistent denominators.
 - **Predictions-record completeness (the contract one layer up).** The eval
   record is built *from* `predictions_all_trajectories.jsonl`, so completeness
   must hold there too: the branching driver writes **one prediction row per
@@ -594,7 +611,11 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
   submission) — covering the three completion paths that previously dropped diffs.
 - Tables are regenerable from the predictions artifacts by `scripts/compute_metrics.py`,
   and figures by `scripts/make_figures.py` from the same JSON (R7.3; rendering
-  covered by `tests/test_budget_and_figures.py`).
+  covered by `tests/test_budget_and_figures.py`). The cross-arm diversity figure
+  is the **rarefied distinct @k\*** chart (per-arm levels + CIs at the common k\*,
+  annotated with the H1 sign-flip p and the H2 gate status); the per-arm raw
+  distinct-patch bars are own-k descriptives and are labeled as such (comparing
+  raw distinct counts across arms is the mechanical sample-size bias R4.2 forbids).
 - Determinism knobs (model id, temperature, bootstrap seed, package versions) are
   recorded with the results; the base model is config-selected end-to-end (R9.1), so a
   different model family can be plugged with no code edits.

@@ -246,6 +246,20 @@ writeup with justification.
   drop the best-of duplicate row consistently whether its trajectory id is
   `"primary"` or null, and all post-hoc parsers of append-mode run logs must read
   the LAST run's block (re-runs append; predictions/metadata reflect the last run).
+  **Eval-outcome integrity:** every `resolved` in the eval record must be a genuine
+  harness verdict. The SWE-bench harness swallows ALL per-instance errors (it
+  writes no report and continues), so a missing report must be **classified** from
+  the harness's own logs: patch-apply failure and test timeout are attributable to
+  the patch and are recorded as failed draws with their reason; ANY other cause is
+  an eval-infrastructure error that must abort the eval step loudly **without
+  writing the eval record** — a Docker flake silently scored as `resolved: false`
+  corrupts the Chen (n, c) in whichever arm it hits, and a written record would be
+  frozen forever by the resume-marker skip. **Stale-report immunity:** the harness
+  returns an existing report keyed by (run_id, model, instance) *without
+  re-evaluating* — patch content is not in its key — so eval run ids must embed a
+  content hash of the patch; a patch-blind run id lets a re-run inherit a stale
+  verdict for a different patch (and the content key makes post-stop retries
+  cheap: identical patches legitimately reuse their cached reports).
 - **R4.2 — Diversity measured INDEPENDENTLY of the branching signal.** The
   diversity of the final outputs must NOT be measured with the same DeBERTa-NLI
   clustering used to *decide* branching (circular). Use an independent metric over
