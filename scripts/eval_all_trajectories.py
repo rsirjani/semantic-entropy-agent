@@ -62,11 +62,41 @@ def deduplicate_patches(trajectories: list[dict]) -> list[dict]:
     return unique
 
 
+def propagate_duplicate_results(
+    trajectories: list[dict], evaluated: dict[str, dict]
+) -> list[dict]:
+    """Build a per-trajectory result row for EVERY trajectory.
+
+    Metric correctness (R4.1 matched-k*): the Chen estimator's (n, c) must count
+    every genuine trajectory, so duplicates and empty patches may not silently
+    vanish from the eval file. Identical patches resolve identically, so each
+    duplicate inherits its evaluated representative's outcome (marked with
+    `deduped_from`); empty patches are unconditionally `resolved: false`.
+    `evaluated` maps patch text -> result row of the representative.
+    """
+    results = []
+    for t in trajectories:
+        tid = t.get("trajectory_id", "primary")
+        patch = t["model_patch"]
+        if not patch:
+            results.append({"trajectory_id": tid, "resolved": False,
+                            "patch_len": 0, "empty_patch": True})
+            continue
+        rep = evaluated[patch]
+        row = {"trajectory_id": tid, "resolved": rep["resolved"],
+               "patch_len": len(patch)}
+        if rep["trajectory_id"] != tid:
+            row["deduped_from"] = rep["trajectory_id"]
+        results.append(row)
+    return results
+
+
 def eval_single_trajectory(
     trajectory: dict,
     instance_id: str,
     run_id: str,
     timeout: int,
+    temp_dir: str | None = None,
 ) -> dict:
     """Evaluate a single trajectory patch and return the result."""
     # Write a single-prediction JSONL to a temp file
@@ -77,7 +107,8 @@ def eval_single_trajectory(
     }
 
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False, dir=os.path.join(PROJECT_ROOT, "results", "branching")
+        mode="w", suffix=".jsonl", delete=False,
+        dir=temp_dir or os.path.join(PROJECT_ROOT, "results", "branching")
     ) as f:
         f.write(json.dumps(pred) + "\n")
         temp_path = f.name
@@ -121,12 +152,24 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate all trajectory patches from a branching run")
-    parser.add_argument("--predictions", default="results/branching/predictions_all_trajectories.jsonl")
+    parser.add_argument("--results-dir", default="results/branching",
+                        help="Arm results dir: predictions are read from and the "
+                             "trajectory_eval_<instance>.json is written into THIS dir, "
+                             "so each arm's evals stay isolated (R2.5).")
+    parser.add_argument("--predictions", default=None,
+                        help="Override predictions path (default: <results-dir>/predictions_all_trajectories.jsonl)")
     parser.add_argument("--instance", required=True, help="Instance ID to evaluate")
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--include-duplicates", action="store_true",
-                        help="Evaluate duplicate patches too (default: skip them)")
+                        help="Force-evaluate duplicate patches too instead of propagating "
+                             "the representative's outcome (slower, same numbers)")
     args = parser.parse_args()
+
+    results_dir = args.results_dir
+    if not os.path.isabs(results_dir):
+        results_dir = os.path.join(PROJECT_ROOT, results_dir)
+    if args.predictions is None:
+        args.predictions = os.path.join(results_dir, "predictions_all_trajectories.jsonl")
 
     predictions_path = os.path.join(PROJECT_ROOT, args.predictions)
     if not os.path.exists(predictions_path):
@@ -140,26 +183,35 @@ def main():
 
     print(f"Found {len(trajectories)} trajectories for {args.instance}")
 
-    if not args.include_duplicates:
-        unique = deduplicate_patches(trajectories)
-        n_dupes = len(trajectories) - len(unique)
+    if args.include_duplicates:
+        to_evaluate = [t for t in trajectories if t["model_patch"]]
+    else:
+        to_evaluate = deduplicate_patches(trajectories)
+        n_dupes = sum(1 for t in trajectories if t["model_patch"]) - len(to_evaluate)
         if n_dupes > 0:
-            print(f"Skipping {n_dupes} duplicate patches ({len(unique)} unique)")
-        trajectories = unique
+            print(f"Evaluating {len(to_evaluate)} unique patches; {n_dupes} duplicates "
+                  f"inherit their representative's outcome (metric n stays exact)")
 
-    for t in trajectories:
+    for t in to_evaluate:
         tid = t.get("trajectory_id", "primary")
         print(f"  {tid:30s} {len(t['model_patch']):5d} chars")
 
-    # Evaluate each trajectory
-    results = []
-    for i, t in enumerate(trajectories):
+    # Evaluate each unique patch; run_id is arm-scoped so logs from different
+    # arms (strategy_t0.7, resample_t0.7, ...) never collide.
+    arm_slug = os.path.basename(os.path.normpath(results_dir))
+    evaluated: dict[str, dict] = {}
+    for t in to_evaluate:
         tid = t.get("trajectory_id", "primary")
-        run_id = f"branching_traj_{tid}"
-        result = eval_single_trajectory(t, args.instance, run_id, args.timeout)
-        results.append(result)
+        run_id = f"{arm_slug}_traj_{tid}"
+        result = eval_single_trajectory(t, args.instance, run_id, args.timeout,
+                                        temp_dir=results_dir)
+        evaluated[t["model_patch"]] = result
         status = "PASS" if result["resolved"] else "FAIL"
         print(f"  → {tid}: {status}")
+
+    # Every genuine trajectory gets a result row (duplicates propagate, empty
+    # patches count as failures) so the eval file's n matches the predictions.
+    results = propagate_duplicate_results(trajectories, evaluated)
 
     # Summary
     print(f"\n{'='*60}")
@@ -177,9 +229,9 @@ def main():
     print(f"  diverse-pass@1:    {'PASS' if n_pass > 0 else 'FAIL'} ({n_pass}/{len(results)} trajectories)")
     print(f"{'='*60}")
 
-    # Save results
+    # Save results into the arm's own dir (R2.5 isolation)
     results_path = os.path.join(
-        PROJECT_ROOT, "results", "branching", f"trajectory_eval_{args.instance}.json"
+        results_dir, f"trajectory_eval_{args.instance}.json"
     )
     with open(results_path, "w") as f:
         json.dump({
