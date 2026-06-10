@@ -103,6 +103,17 @@ The control is the **same scaffold** with branching disabled — *not* the legac
 control reads `k = #trajectories the treatment produced` per instance from the
 treatment metadata (`scripts/run_resample_baseline.py --treatment-dir …`).
 
+**Arm purity at the fallback layer (R3.1).** If SDLG cannot produce any
+alternative at its branch point (too-short reasoning, scoring failure), the SDLG
+arm does **not** branch on that instance — there is deliberately no
+temperature-sampling fallback. (One existed and was removed: it silently
+substituted a different diversity mechanism that the artifacts would have
+recorded as `sdlg_fork`, and it hardcoded T = 0.7 even in the T = 0.2/1.0 sweep
+cells, breaking the R2.4 temperature match there.) Every branch in each
+treatment arm is therefore attributable to that arm's named generator; an
+instance where the generator produces nothing stays a single greedy trajectory,
+which the realized-N reporting flags.
+
 ### 2.2 Matched budget & temperature
 
 One `sample_temperature` knob (`configs/branching.yaml`) drives **both** the proposer

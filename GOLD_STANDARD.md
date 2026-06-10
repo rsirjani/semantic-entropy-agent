@@ -201,7 +201,12 @@ deviation from a paper is intentional and documented (not a bug).
 ## 3. Ablations  `[BLOCKER for the ones claimed; otherwise scope explicitly]`
 
 - **R3.1 — Diversity generator:** strategy_proposal vs sdlg, isolated (never
-  stacked), each attributable.
+  stacked), each attributable — **including at the fallback layer**: an arm
+  that cannot produce candidates at a decision point must produce NO branch
+  there, never silently substitute a different generator. (A temperature-
+  sampling fallback inside the sdlg arm mis-attributes the mechanism in the
+  artifacts — the orchestrator records every fork as `sdlg_fork` — and a
+  hardcoded fallback temperature breaks the R2.4 match in the sweep cells.)
 - **R3.2 — Clustering strategy:** greedy vs connected vs kernel, each into its own
   results dir; τ recalibrated for kernel (non-transferable scale, documented).
 - **R3.3 — τ / entropy-gate sensitivity:** evaluated **post-hoc from the τ=0

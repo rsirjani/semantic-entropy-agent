@@ -128,6 +128,53 @@ def test_importance_scores_are_per_substitute(monkeypatch):
     assert scores[(3, 7)] != scores[(3, 9)]
 
 
+def test_importance_scores_hit_the_configured_port(monkeypatch):
+    """Regression: `api_base.rstrip("/v1")` strips a CHARACTER SET, not a
+    suffix — with the checked-in api_base http://localhost:8001/v1 it ate the
+    port's trailing 1 (-> :800), so every importance query failed silently and
+    all I_ij were 0.0 in the live configuration."""
+    import requests
+
+    urls = []
+
+    def record_post(url, json=None, timeout=None):
+        urls.append(url)
+        return _FakeResponse({"choices": [{"logprobs": {"top_logprobs": [{}]}}]})
+
+    monkeypatch.setattr(requests, "post", record_post)
+    gen = SDLGGenerator(nli_model=object(), n_candidates=3)
+    gen._get_importance_scores(
+        "fix the parser bug",
+        [{"position": 2, "token": "Ġparser", "replacement": "Ġlexer",
+          "replacement_id": 5}],
+        "openai/qwen", {"api_base": "http://localhost:8001/v1"}, [],
+    )
+    assert urls, "no importance query was issued"
+    for url in urls:
+        assert url.startswith("http://localhost:8001/v1/"), url
+
+
+def test_generate_without_alternatives_stays_pure_sdlg(monkeypatch):
+    """R3.1/R2.4: when SDLG cannot produce a substitution, the arm must NOT
+    silently switch to temperature sampling (which the orchestrator would log
+    as `sdlg_fork`, mis-attributing the diversity mechanism — and which
+    hardcoded T=0.7 even in the T=0.2/1.0 sweep cells). No alternatives ->
+    return only the greedy response (no fork, no LLM sampling call)."""
+    import litellm
+
+    def no_llm_call(**kwargs):
+        raise AssertionError("temperature-sampling fallback must not fire")
+
+    monkeypatch.setattr(litellm, "completion", no_llm_call)
+    gen = SDLGGenerator(nli_model=object(), n_candidates=5)
+    monkeypatch.setattr(gen, "_rank_substitutions", lambda *a, **k: [])
+
+    greedy = ("THOUGHT: fix the parser bug in the lexer module now\n"
+              "```mswea_bash_command\nls\n```")
+    out = gen.generate("openai/qwen", {}, [], greedy)
+    assert out == [greedy]
+
+
 def test_importance_scores_zero_when_generator_unreachable(monkeypatch):
     """Scoring failures mean negligible generator mass (0.0), never a borrowed
     position-level probability."""

@@ -179,7 +179,7 @@ class SDLGGenerator:
         else:
             logger.warning("SDLG: thought text too short for attribution, skipping thought-level")
             # Only redirect budget to code if code-level SDLG is enabled;
-            # otherwise stay reasoning-only and let the temperature fallback fire.
+            # otherwise stay reasoning-only (no alternatives -> no fork).
             if self.diversify_code:
                 n_code = self.n_candidates - 1  # All budget goes to code
 
@@ -201,11 +201,20 @@ class SDLGGenerator:
             candidates.extend(code_alts)
             logger.info(f"SDLG CODE: generated {len(code_alts)} alternatives")
 
-        # If we got nothing, fall back to temperature
+        # R3.1 arm attributability: if SDLG produced no alternatives (too-short
+        # reasoning, scoring failure), the arm must NOT silently switch to a
+        # different diversity mechanism. The previous temperature-sampling
+        # fallback (a) contaminated the sdlg-vs-strategy ablation — the
+        # orchestrator records every fork as `sdlg_fork`, so temperature-sampled
+        # branches were attributed to SDLG with no trace in the artifacts — and
+        # (b) hardcoded T=0.7, breaking the R2.4 temperature match in the
+        # T=0.2/1.0 sweep cells. No alternatives -> no fork: the instance stays
+        # a single greedy trajectory and the realized-N reporting flags it.
         if len(candidates) <= 1:
-            logger.warning("SDLG: no alternatives from either target, falling back to temperature")
-            return self._fallback_temperature(model_name, model_kwargs, messages, greedy_response)
-
+            logger.warning(
+                "SDLG: no alternatives from either target — no fork "
+                "(deliberately no temperature fallback; the arm stays pure SDLG)"
+            )
         return candidates
 
     def _generate_alternatives_from_ranked(
@@ -470,7 +479,15 @@ class SDLGGenerator:
         import requests
 
         api_base = model_kwargs.get("api_base", "http://localhost:8000/v1")
-        base_url = api_base.rstrip("/v1").rstrip("/")
+        # Suffix-safe server-root derivation. rstrip("/v1") strips a CHARACTER
+        # SET, not a suffix — it eats trailing "1"s of the PORT too
+        # (":8001/v1" -> ":800"), silently sending every importance query to a
+        # dead port and zeroing all I_ij. The checked-in config uses port 8001
+        # (host port 8000 is owned by the PDF-reader relay), so this is the
+        # live configuration, not an edge case.
+        base_url = api_base.rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[: -len("/v1")]
         model = model_name.replace("openai/", "")
 
         # Group candidates by position; locate each position's text prefix via
@@ -645,18 +662,3 @@ class SDLGGenerator:
         except Exception as e:
             logger.warning(f"SDLG code completion failed: {e}")
             return greedy_response
-
-    def _fallback_temperature(
-        self,
-        model_name: str,
-        model_kwargs: dict,
-        messages: list[dict],
-        greedy_response: str,
-    ) -> list[str]:
-        """Fallback to temperature sampling when SDLG can't compute scores."""
-        from src.diversity.temperature_sampler import TemperatureSampler
-        sampler = TemperatureSampler(
-            n_candidates=self.n_candidates,
-            temperature=0.7,
-        )
-        return sampler.generate(model_name, model_kwargs, messages, greedy_response)
