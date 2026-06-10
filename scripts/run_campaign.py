@@ -54,7 +54,10 @@ DECISIONS_DIR = os.path.join(PROJECT_ROOT, "campaign_decisions")
 STATE_PATH = os.path.join(CAMPAIGN_DIR, "campaign_state.json")
 STOP_FILE = os.path.join(DECISIONS_DIR, "STOP")
 
-VLLM_URL = "http://localhost:8000"
+# Host port 8001: port 8000 on this machine is permanently shadowed by WSL's
+# localhost relay forwarding to the pdf-reader backend (the PDF MCP server),
+# so Docker cannot publish there. Container-internal vLLM stays on 8000.
+VLLM_URL = "http://localhost:8001"
 NLI_URL = "http://localhost:8100"
 PRIMARY_TEMP = 0.7  # pre-registered primary endpoint (scrutiny_03.md, R6.5)
 
