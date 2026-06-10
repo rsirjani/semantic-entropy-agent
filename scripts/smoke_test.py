@@ -1,13 +1,17 @@
-"""Smoke test for the vLLM server."""
+"""Smoke test for the vLLM server (run BEFORE launching the campaign)."""
 
 import subprocess
 import sys
 import time
 
 import openai
+import requests
 
 
-BASE_URL = "http://localhost:8000/v1"
+# 8001 matches configs/branching.yaml model.api_base and start_vllm.sh: host
+# port 8000 is owned by the wslrelay->pdf-reader MCP backend on this machine,
+# so probing 8000 would "fail" against a perfectly healthy live server.
+BASE_URL = "http://localhost:8001/v1"
 MODEL = "qwen3-coder"
 
 
@@ -114,6 +118,56 @@ def test_tool_calling(client: openai.OpenAI) -> bool:
         return True
 
 
+def test_sdlg_importance_contract() -> bool:
+    """Probe the two RAW /v1/completions request shapes the SDLG importance
+    scorer (`src/diversity/sdlg.py::_get_importance_scores`) depends on, with
+    the exact JSON it sends. RESULTS.md SS2.4 deviation 1 discloses that these
+    are otherwise exercised only at run time, where a rejecting vLLM version
+    silently degrades I_ij to 0.0 for out-of-top-k substitutes — running this
+    BEFORE the campaign turns that disclosed risk into a checked precondition.
+    """
+    print("\n--- Test 4: SDLG importance-scoring contract (raw completions) ---")
+    root = BASE_URL[: -len("/v1")] if BASE_URL.endswith("/v1") else BASE_URL
+    ok = True
+    # (a) top-k next-token logprobs at a text prefix (max_tokens=1, logprobs=20).
+    try:
+        resp = requests.post(
+            f"{root}/v1/completions",
+            json={"model": MODEL, "prompt": "The bug is caused by", "max_tokens": 1,
+                  "logprobs": 20, "temperature": 0},
+            timeout=30,
+        )
+        top = resp.json()["choices"][0]["logprobs"]["top_logprobs"][0]
+        print(f"  top-k logprobs: OK ({len(top)} alternatives at position 0)")
+        if not top:
+            ok = False
+    except Exception as e:
+        print(f"  top-k logprobs: FAIL ({e}) — every I_ij would be 0.0")
+        ok = False
+    # (b) echo-scored prompt logprobs (max_tokens=0, echo=True, logprobs=0).
+    try:
+        resp = requests.post(
+            f"{root}/v1/completions",
+            json={"model": MODEL, "prompt": "The bug is caused by a missing check",
+                  "max_tokens": 0, "echo": True, "logprobs": 0, "temperature": 0},
+            timeout=30,
+        )
+        lp = resp.json()["choices"][0]["logprobs"]
+        n_off = len(lp.get("text_offset") or [])
+        n_lp = len(lp.get("token_logprobs") or [])
+        print(f"  echo prompt-logprobs: OK ({n_lp} token logprobs, {n_off} offsets)")
+        if n_lp == 0 or n_off == 0:
+            print("  WARNING: echo accepted but returned no logprobs/offsets — "
+                  "out-of-top-k substitutes would score I_ij = 0.0 (disclosed "
+                  "degradation, RESULTS.md SS2.4).")
+            ok = False
+    except Exception as e:
+        print(f"  echo prompt-logprobs: FAIL ({e}) — out-of-top-k substitutes "
+              f"would score I_ij = 0.0 (disclosed degradation, RESULTS.md SS2.4)")
+        ok = False
+    return ok
+
+
 def check_vram():
     """Print GPU VRAM usage."""
     print("\n--- VRAM Usage ---")
@@ -145,6 +199,7 @@ def main():
     results["basic_completion"] = test_basic_completion(client)
     results["logprobs"] = test_logprobs(client)
     results["tool_calling"] = test_tool_calling(client)
+    results["sdlg_importance_contract"] = test_sdlg_importance_contract()
     check_vram()
 
     print("\n--- Summary ---")

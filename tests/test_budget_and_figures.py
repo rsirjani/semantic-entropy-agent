@@ -183,6 +183,25 @@ def test_make_figures_renders_pngs(tmp_path):
         assert os.path.isfile(p) and os.path.getsize(p) > 0
 
 
+def test_make_figures_partial_artifact_renders_na_not_zero(tmp_path, capsys):
+    """Partial/legacy metrics JSON: a missing metric cell or a null ci95 must
+    render as an annotated 'n/a' (and a printed warning), never crash and
+    never draw a silent 0-height bar a reader would mistake for a true zero."""
+    report = {
+        "treatment": {"summary": {
+            "n_instances": 10,
+            "diverse_pass_at_k": {"mean": 0.6, "ci95": None},     # null CI
+            # distinct_patches cell missing entirely
+            "mean_pairwise_distance": {"mean": 0.5, "ci95": [0.35, 0.65]},
+        }},
+    }
+    out = mf.make_figures(report, str(tmp_path / "figs"))
+    assert len(out) == 3
+    for p in out:
+        assert os.path.isfile(p) and os.path.getsize(p) > 0
+    assert "distinct_patches" in capsys.readouterr().out  # warned, not silent
+
+
 def test_make_figures_renders_rarefied_comparison(tmp_path):
     """R4.2 in the figures: cross-arm diversity must be shown rarefied at the
     common k* (the raw per-arm distinct bars are own-k descriptives), with the

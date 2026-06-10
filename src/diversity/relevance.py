@@ -1,12 +1,24 @@
-"""Relevance scoring for search-phase branching.
+"""Relevance scoring for SEARCH-phase saturation detection.
 
-Scores how relevant each search finding is to the problem statement.
-Uses LLM to summarize what the search result shows, THEN uses DeBERTa
-NLI to check entailment between the summary and the problem.
+Scores how relevant each search finding is to the problem statement. Two
+steps: (1) an LLM call summarizes what the search result shows in one
+sentence; (2) the summary is scored against the problem statement by ONE of
+two backends, selected by `use_nli`:
 
-Raw search output (code, grep results) doesn't match the format of a
-bug description, so DeBERTa can't compare them directly. The LLM summary
-bridges that gap.
+  - use_nli=False (the default AND the checked-in config,
+    `relevance_use_nli: false`): a temperature-0 LLM call rates relevance
+    0-10, normalized to [0, 1]. This is the LIVE configuration — early
+    experiments showed DeBERTa entailment is the wrong construct here
+    (a finding can be highly relevant without being ENTAILED by the bug
+    report; entailment != topical relevance).
+  - use_nli=True: P(entailment | premise=problem, hypothesis=summary) under
+    DeBERTa-MNLI. Kept as an ablation backend; the LLM summary bridges the
+    format gap (raw grep/code output is out of DeBERTa's domain).
+
+Failure semantics (symmetric across arms — every arm runs the same SEARCH
+machinery, so none of this is a treatment/control confound): a failed
+summary call falls back to the raw thought text; a failed scoring call
+scores 0.0, which counts toward the low-relevance saturation streak.
 """
 
 import logging
@@ -152,22 +164,3 @@ class RelevanceScorer:
             "relevance": relevance,
             "is_relevant": relevance > self.threshold,
         }
-
-    def has_strategy(self, thought: str) -> bool:
-        """Check if the agent's thought contains a fix strategy."""
-        thought_lower = thought.lower()
-        strategy_signals = [
-            "the fix should",
-            "the fix is to",
-            "i think the bug is",
-            "the root cause is",
-            "the issue is that",
-            "to fix this we need to",
-            "the solution is to",
-            "i'll modify",
-            "i need to modify",
-            "i need to change",
-            "let me fix",
-            "strategy:",
-        ]
-        return any(signal in thought_lower for signal in strategy_signals)

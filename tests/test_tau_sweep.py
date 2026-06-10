@@ -113,7 +113,8 @@ def test_sweep_keeps_logged_entropy_when_partition_disagrees(tmp_path):
 def test_sweep_reports_non_modal_realized_n(tmp_path):
     rd = str(tmp_path)
     # The proposer can under-deliver (<N strategies); realized N must be
-    # reported and non-modal instances flagged (different quantization grid).
+    # reported, non-modal instances flagged (different quantization grid),
+    # and — R3.3 — EXCLUDED from the pooled sweep rows, never silently mixed.
     _write_log(rd, "i1", 1.609, [0, 1, 2, 3, 4])        # N=5
     _write_log(rd, "i2", 1.609, [0, 1, 2, 3, 4])        # N=5
     _write_log(rd, "i3", 1.099, [0, 1, 2])              # N=3 (under-delivered)
@@ -124,6 +125,14 @@ def test_sweep_reports_non_modal_realized_n(tmp_path):
     assert report["n_candidates_by_instance"] == {"i1": 5, "i2": 5, "i3": 3}
     assert report["non_modal_n_instances"] == ["i3"]
     assert len(report["achievable_entropies"]) == 7     # grid for the MODAL N
+    assert report["excluded_from_pooled_rows"] == ["i3"]
+    assert report["n_pooled_instances"] == 2
+    assert "i3" in report["per_instance"]               # still fully reported
+    # Discriminating tau: at tau=1.2 both modal instances branch (1.609 > 1.2)
+    # while i3 (1.099, off-grid) would have gated — pooling it would yield
+    # branch_rate 2/3 instead of the modal-grid 1.0.
+    report2 = ts.sweep(rd, rd, taus=[1.2])
+    assert report2["sweep"][0]["branch_rate"] == 1.0
 
 
 def test_sweep_dominant_in_nonzero_cluster(tmp_path):

@@ -51,20 +51,31 @@ def make_figures(report: dict, out_dir: str) -> list[str]:
     written: list[str] = []
 
     for key, ylabel, ylim in _METRICS:
-        means, lo_err, hi_err = [], [], []
+        means, lo_err, hi_err, missing = [], [], [], []
         for lab in labels:
             cell = arms[lab].get(key)
-            if not cell:
-                means.append(0.0); lo_err.append(0.0); hi_err.append(0.0); continue
-            m = cell.get("mean", 0.0) or 0.0
-            lo, hi = cell.get("ci95", [m, m])
+            if not cell or cell.get("mean") is None:
+                # Partial/legacy artifact: a missing metric must NOT render as
+                # a silent 0-height bar (indistinguishable from a true zero in
+                # a paper figure) — draw nothing and annotate "n/a".
+                means.append(np.nan); lo_err.append(0.0); hi_err.append(0.0)
+                missing.append(lab)
+                continue
+            m = cell["mean"]
+            lo, hi = cell.get("ci95") or [m, m]
             means.append(m); lo_err.append(max(0.0, m - lo)); hi_err.append(max(0.0, hi - m))
 
         fig, ax = plt.subplots(figsize=(1.6 + 1.3 * len(labels), 3.2))
         x = np.arange(len(labels))
         ax.bar(x, means, yerr=[lo_err, hi_err], capsize=5, color="#4C72B0",
                edgecolor="black", linewidth=0.6)
+        for xi, m in zip(x, means):
+            if np.isnan(m):
+                ax.text(xi, 0.0, "n/a", ha="center", va="bottom", fontsize=8)
         ax.set_xticks(x); ax.set_xticklabels(labels, rotation=15, ha="right")
+        if missing:
+            print(f"WARNING: no '{key}' cell for arm(s) {missing} — "
+                  f"rendered as 'n/a', not as a zero bar.")
         ax.set_ylabel(ylabel)
         if ylim:
             ax.set_ylim(*ylim)
@@ -105,14 +116,20 @@ def make_comparison_figure(report: dict, arm_labels: list[str], out_dir: str) ->
     means, lo_err, hi_err = [], [], []
     for key in ("arm_a", "arm_b"):
         cell = ra.get(key) or {}
-        m = cell.get("mean", 0.0) or 0.0
-        lo, hi = cell.get("ci95", [m, m])
+        m = cell.get("mean")
+        if m is None:  # partial artifact: render "n/a", never a fake 0 bar
+            means.append(np.nan); lo_err.append(0.0); hi_err.append(0.0)
+            continue
+        lo, hi = cell.get("ci95") or [m, m]
         means.append(m); lo_err.append(max(0.0, m - lo)); hi_err.append(max(0.0, hi - m))
 
     fig, ax = plt.subplots(figsize=(4.4, 3.6))
     x = np.arange(2)
     ax.bar(x, means, yerr=[lo_err, hi_err], capsize=5,
            color=["#4C72B0", "#C44E52"], edgecolor="black", linewidth=0.6)
+    for xi, m in zip(x, means):
+        if np.isnan(m):
+            ax.text(xi, 0.0, "n/a", ha="center", va="bottom", fontsize=8)
     ax.set_xticks(x); ax.set_xticklabels(labels, rotation=15, ha="right")
     ax.set_ylabel("rarefied distinct patches @ matched k*")
     title = "H1 (diversity): rarefied distinct @k* (95% CI)"

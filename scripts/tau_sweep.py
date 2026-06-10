@@ -199,7 +199,8 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
     # the proposer can under-deliver (parse failure, short rejection pass), and
     # entropy values from different N are NOT on the same quantization grid —
     # so the realized N must be REPORTED, not assumed. The grid uses the MODAL
-    # N; instances at a different N are flagged, never silently pooled.
+    # N; instances at a different N are flagged AND excluded from the pooled
+    # sweep rows below (R3.3), never silently pooled.
     n_by_instance = {iid: sum(parsed[iid]["cluster_sizes"])
                      for iid in usable
                      if parsed[iid]["cluster_sizes"]
@@ -214,6 +215,19 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
         n_candidates = max(sorted(counts), key=lambda v: (counts[v], v))
     non_modal = sorted(i for i, v in n_by_instance.items() if v != n_candidates)
 
+    # R3.3: the pooled sweep rows must EXCLUDE instances off the modal-N
+    # quantization grid (non-modal realized N, or — when realized-N info
+    # exists for this arm — an unparseable partition), never silently mix
+    # entropies from different grids into branch_rate / gated_pass_rate.
+    # They stay fully reported in per_instance. When NO instance yields a
+    # realized N (the SDLG arm: branching_log has no partition), no exclusion
+    # is possible and all usable instances pool — the validity note says so.
+    if n_candidates is not None:
+        pooled = [i for i in usable if n_by_instance.get(i) == n_candidates]
+    else:
+        pooled = list(usable)
+    excluded_from_pooled = sorted(set(usable) - set(pooled))
+
     if taus is None:
         taus = partition_entropies(n_candidates) if n_candidates else \
             [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
@@ -226,7 +240,7 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
     for tau in taus:
         branched, used, passed = [], [], []
         missing_gated: list[str] = []
-        for iid in usable:
+        for iid in pooled:
             info = parsed[iid]
             outcomes = evals.get(iid, {})
             if info["entropy"] > tau + 1e-9:
@@ -240,7 +254,7 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
                 if tid not in outcomes:
                     missing_gated.append(f"{iid}:{tid}")
                 passed.append(1.0 if outcomes.get(tid, False) else 0.0)
-        n = len(usable)
+        n = len(pooled)
         rows.append({
             "tau": tau,
             "branch_rate": round(sum(branched) / n, 4) if n else None,
@@ -252,7 +266,9 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
     return {
         "results_dir": results_dir,
         "n_instances": len(usable),
+        "n_pooled_instances": len(pooled),
         "skipped_instances": skipped,
+        "excluded_from_pooled_rows": excluded_from_pooled,
         "n_candidates": n_candidates,
         "n_candidates_by_instance": n_by_instance,
         "non_modal_n_instances": non_modal,
@@ -271,9 +287,12 @@ def sweep(results_dir: str, eval_path: str, taus: list[float] | None) -> dict:
             "quantized at small N); intermediate taus are equivalent. Entropies "
             "are recomputed at full precision from the logged cluster partition "
             "when consistent with the logged value (entropy_source per instance); "
-            "instances whose realized N deviates from the modal N are listed in "
-            "non_modal_n_instances — their entropies sit on a DIFFERENT "
-            "quantization grid and must not be pooled silently."),
+            "instances whose realized N deviates from the modal N sit on a "
+            "DIFFERENT quantization grid and are EXCLUDED from the pooled sweep "
+            "rows (listed in non_modal_n_instances / excluded_from_pooled_rows, "
+            "fully reported in per_instance). When no instance yields a realized "
+            "N (the SDLG arm logs no partition), no grid exclusion is possible "
+            "and all usable instances pool — read those rows with that caveat."),
     }
 
 
@@ -301,7 +320,8 @@ def main() -> None:
         print(f"  skipped (no entropy artifact): {report['skipped_instances']}")
     if report["non_modal_n_instances"]:
         print(f"  WARNING — realized N deviates from modal N={report['n_candidates']} "
-              f"on: {report['non_modal_n_instances']} (different quantization grid)")
+              f"on: {report['non_modal_n_instances']} (different quantization grid; "
+              f"EXCLUDED from the pooled sweep rows, reported in per_instance)")
 
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

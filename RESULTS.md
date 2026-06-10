@@ -236,8 +236,17 @@ predictions, eval records, or prior decision files) stops the campaign loudly.
   the source flagged, when the two disagree (kernel runs); (ii) the **realized**
   candidate count N is reported per instance — the proposer can return fewer than
   the configured 5 strategies — and instances whose N deviates from the modal N
-  are flagged (`non_modal_n_instances`) because their entropies sit on a
-  different quantization grid and must not be pooled silently.
+  are flagged (`non_modal_n_instances`) **and excluded from the pooled sweep
+  rows** (`excluded_from_pooled_rows`; they remain fully reported in
+  `per_instance`) because their entropies sit on a different quantization grid
+  and must never be pooled silently. The same guard applies to the R5.2 entropy
+  strata: `compute_metrics.py` parses each instance's realized N from the same
+  decisions-log partition and excludes off-modal-grid instances from the strata
+  pool and the median threshold (`strata_grid_excluded`), and an
+  off-mode-recovery record for such an instance carries `low_entropy: null`
+  with the reason rather than a label computed against the wrong grid. (The
+  SDLG arm logs no cluster partition, so no realized-N guard is possible there;
+  its strata/sweep outputs say so explicitly instead of implying the guard ran.)
 
 ### 2.4 Documented deviations from the reference methods (R1.1)
 
@@ -256,7 +265,16 @@ These are deliberate, disclosed deviations — not bugs:
    `tests/test_sdlg_importance.py`); (iii) the chosen substitute is spliced into the
    reasoning text as a string (first occurrence of the original token's surface form)
    and the generator re-tokenizes and completes from the splice point. No bilingual
-   embedding mapping is used.
+   embedding mapping is used. *Graceful-degradation contract (disclosed):* the
+   echo-scored fallback (`max_tokens=0, echo=True` prompt-logprobs) is exercised
+   against the pinned vLLM only at run time; if the served version rejects that
+   request shape, substitutes outside the generator's top-k score `I_ij = 0.0`
+   (negligible-mass down-ranking, visible in the run logs) — the ranking degrades
+   toward (A+S)-dominated for those candidates rather than failing or silently
+   substituting another mechanism. `scripts/smoke_test.py` probes both raw
+   request shapes (top-k completions logprobs; echo prompt-logprobs) against the
+   live server pre-launch, so the contract is checked before, not during, the
+   campaign.
 2. **Score combination.** Candidates are ranked by the arithmetic mean
    `(A_i + S_ij + I_ij)/3` rather than the paper's product form: the mean keeps a
    candidate rankable on attribution+substitution when the generator assigns it

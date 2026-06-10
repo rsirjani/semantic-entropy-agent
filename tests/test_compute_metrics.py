@@ -303,6 +303,69 @@ def test_selected_pass_at_1_majority_signature(tmp_path):
     assert out["selected_pass_at_1"] == 0.0   # honest: majority missed the fix
 
 
+def test_load_realized_n_counts_last_block_members(tmp_path):
+    """Realized N comes from the LAST STRATEGY PROPOSAL block's member lines
+    (append-mode log: the first block is a stale run)."""
+    iid = "sympy__sympy-3"
+    inst = tmp_path / iid
+    inst.mkdir()
+    (inst / "phased_decisions.log").write_text(
+        "STRATEGY PROPOSAL\nProposed: 5 | Clusters: 5 | Unique: 5 | Entropy: 1.609\n"
+        + "".join(f"  [{i+1}] cluster={i}: s\n" for i in range(5))
+        + "\nUnique strategies to fork:\n"
+        + "STRATEGY PROPOSAL\nProposed: 3 | Clusters: 2 | Unique: 2 | Entropy: 0.637\n"
+        + "  [1] cluster=0: s\n  [2] cluster=0: s\n  [3] cluster=1: s\n"
+        + "\nUnique strategies to fork:\n",
+        encoding="utf-8")
+    assert cm.load_realized_n(str(tmp_path), [iid]) == {iid: 3}
+    # Missing log -> omitted, never zeroed.
+    assert cm.load_realized_n(str(tmp_path), ["absent"]) == {}
+
+
+def test_compare_strata_exclude_off_modal_grid():
+    """R3.3 at the strata layer: an instance whose realized N deviates from the
+    modal N sits on a DIFFERENT entropy-quantization grid (max ln N differs) and
+    must be excluded from the strata pool and the median threshold; its
+    off-mode record must carry low_entropy=None with the reason, never a
+    low/high label computed against the wrong grid."""
+    iids = ["i1", "i2", "i3", "i4"]
+    ta = {i: {"k": 2, "n_resolved": 0} for i in iids}
+    tb = {i: {"k": 2, "n_resolved": 0} for i in iids}
+    ta["i4"] = {"k": 2, "n_resolved": 1}      # i4: treatment-only pass -> off-mode
+    entropy = {"i1": 0.2, "i2": 1.5, "i3": 1.0, "i4": 0.1}
+    realized_n = {"i1": 5, "i2": 5, "i3": 5, "i4": 4}
+    comp = cm.compare(ta, tb, entropy=entropy, seed=0, split=None,
+                      realized_n=realized_n)
+    assert comp["strata_modal_n"] == 5
+    assert comp["strata_grid_excluded"]["non_modal_n"] == ["i4"]
+    # Median over the MODAL-grid instances only ({0.2, 1.5, 1.0} -> 1.0); with
+    # i4 silently pooled it would have been 0.6.
+    assert abs(comp["entropy_split_threshold"] - 1.0) < 1e-9
+    assert comp["gain_by_stratum"]["low_entropy"]["n"] == 2    # i1, i3
+    assert comp["gain_by_stratum"]["high_entropy"]["n"] == 1   # i2
+    omr = comp["off_mode_recovery_candidates"]
+    assert [o["instance_id"] for o in omr] == ["i4"]
+    assert omr[0]["low_entropy"] is None
+    assert omr[0]["low_entropy_reason"] == "realized_n_off_modal_grid"
+    assert omr[0]["realized_n"] == 4
+
+
+def test_compare_strata_no_realized_n_info_says_so():
+    """SDLG arm (no parseable partition): no grid exclusion is possible — the
+    output must say so rather than implying the guard ran."""
+    iids = ["i1", "i2"]
+    ta = {i: {"k": 2, "n_resolved": 0} for i in iids}
+    tb = {i: {"k": 2, "n_resolved": 0} for i in iids}
+    comp = cm.compare(ta, tb, entropy={"i1": 0.2, "i2": 1.5}, seed=0,
+                      split=None, realized_n={})
+    assert comp["strata_modal_n"] is None
+    assert comp["strata_grid_excluded"] == {"non_modal_n": [], "unknown_n": []}
+    assert "No realized-N information" in comp["strata_grid_note"]
+    # Strata still computed over all entropy-bearing instances.
+    assert comp["gain_by_stratum"]["low_entropy"]["n"] == 1
+    assert comp["gain_by_stratum"]["high_entropy"]["n"] == 1
+
+
 def test_load_entropy_from_phased_decisions_log(tmp_path):
     iid = "sympy__sympy-1"
     inst_dir = tmp_path / iid

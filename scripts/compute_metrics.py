@@ -181,6 +181,9 @@ def set_valued_evidence(predictions_path: str, eval_path: str) -> list[dict]:
 
 
 _ENTROPY_RE = re.compile(r"Entropy:\s*([0-9]*\.?[0-9]+)")
+_PROPOSAL_HEADER_RE = re.compile(
+    r"Proposed:\s*(\d+)\s*\|\s*Clusters:\s*(\d+)\s*\|")
+_PROPOSAL_MEMBER_RE = re.compile(r"^\s*\[(\d+)\]\s+cluster=(\d+):", re.MULTILINE)
 
 
 def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
@@ -223,6 +226,46 @@ def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
     return out
 
 
+def load_realized_n(results_dir: str | None, instance_ids) -> dict[str, int]:
+    """Realized candidate count N per instance (strategy arm), best-effort.
+
+    Counted from the per-strategy member lines (`[i] cluster=j:`) of the LAST
+    STRATEGY PROPOSAL block — the same lines tau_sweep.py sums into cluster
+    sizes, so the two scripts agree on what "realized N" means. Instances with
+    no parseable block (SDLG arm, missing log) are omitted, not zeroed.
+
+    Why this exists (R3.3): discrete semantic entropy is partition-quantized
+    BY N — entropies from different realized N sit on different quantization
+    grids (max ln N differs), so the R5.2 entropy strata must never silently
+    pool an under-delivered instance (N=4) with the modal-N (N=5) ones.
+    """
+    out: dict[str, int] = {}
+    if not results_dir:
+        return out
+    for iid in instance_ids:
+        log = os.path.join(results_dir, iid, "phased_decisions.log")
+        if not os.path.isfile(log):
+            continue
+        try:
+            with open(log, "r", encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            continue
+        m = None
+        for m in _PROPOSAL_HEADER_RE.finditer(text):
+            pass  # keep the LAST block (append-mode log; first would be stale)
+        if not m:
+            continue
+        block = text[m.end():]
+        stop = block.find("Unique strategies to fork")
+        if stop != -1:
+            block = block[:stop]
+        n = len(_PROPOSAL_MEMBER_RE.findall(block))
+        if n > 0:
+            out[iid] = n
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Per-arm summary
 # --------------------------------------------------------------------------- #
@@ -262,7 +305,8 @@ def summarize(table: dict[str, dict], seed: int) -> dict:
 
 def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
             split: float | None, preds_a: dict | None = None,
-            preds_b: dict | None = None) -> dict:
+            preds_b: dict | None = None,
+            realized_n: dict[str, int] | None = None) -> dict:
     shared = sorted(set(table_a) & set(table_b))
 
     # Matched-k is enforced AT METRIC TIME, not just at run time: each shared
@@ -428,8 +472,36 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
     # the two analyses cannot disagree about which instances are "low entropy".
     # Strata reuse the SAME matched-k gains as the headline (never recomputed at
     # each arm's own k). At n=10 the strata are DESCRIPTIVE, not confirmatory.
+    #
+    # R3.3 quantization-grid guard: discrete entropy is partition-quantized BY
+    # the realized candidate count N (max ln N differs), so when realized-N
+    # info exists (strategy arm), instances whose N deviates from the modal N
+    # — or whose N could not be parsed — are EXCLUDED from the strata pool and
+    # the median threshold, and named in the output, never silently mixed
+    # across grids. With no realized-N info at all (SDLG arm: the branching
+    # log carries no cluster partition), no exclusion is possible; the output
+    # says so instead of implying the guard ran.
     gain_by_iid = dict(zip(usable, gains))
-    ent_shared = {i: entropy[i] for i in usable if i in entropy}
+    modal_n = None
+    grid_excluded: dict[str, list[str]] = {"non_modal_n": [], "unknown_n": []}
+    if realized_n:
+        n_counts: dict[int, int] = {}
+        for i in usable:
+            if i in realized_n:
+                n_counts[realized_n[i]] = n_counts.get(realized_n[i], 0) + 1
+        if n_counts:
+            # Ties break to the LARGER N (the configured n_strategies is an
+            # upper bound — under-delivery is the anomaly), matching tau_sweep.
+            modal_n = max(sorted(n_counts), key=lambda v: (n_counts[v], v))
+            for i in usable:
+                if i not in realized_n:
+                    grid_excluded["unknown_n"].append(i)
+                elif realized_n[i] != modal_n:
+                    grid_excluded["non_modal_n"].append(i)
+    grid_ok = {i for i in usable
+               if modal_n is None or realized_n.get(i) == modal_n}
+    ent_shared = {i: entropy[i] for i in usable
+                  if i in entropy and i in grid_ok}
     thr = split
     if thr is None and len(ent_shared) >= 2:
         thr = float(np.median(list(ent_shared.values())))
@@ -445,6 +517,17 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
             b: {"n": len(v), "mean_gain": round(float(np.mean(v)), 4) if v else None}
             for b, v in strata.items()
         }
+    result["strata_modal_n"] = modal_n
+    result["strata_grid_excluded"] = grid_excluded
+    result["strata_grid_note"] = (
+        ("Entropy strata and the median threshold pool only instances at the "
+         f"modal realized N={modal_n}; excluded instances (different/unknown "
+         "quantization grid) are listed in strata_grid_excluded (R3.3).")
+        if modal_n is not None else
+        ("No realized-N information available for this arm (no parseable "
+         "STRATEGY PROPOSAL partition — e.g. the SDLG arm), so the R3.3 "
+         "quantization-grid exclusion could not be applied; read strata with "
+         "that caveat."))
 
     # R5.4 — off-mode recovery: treatment passed, vanilla did NOT, at LOW entropy.
     # Uses the SAME `thr` as the stratification above (median of shared, or --entropy-split).
@@ -456,13 +539,26 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
         b_pass = table_b[i]["n_resolved"] > 0
         if a_pass and not b_pass:
             e = entropy.get(i)
-            low = (e is not None and thr is not None and e <= thr) if thr is not None else None
+            if i not in grid_ok:
+                # Off-grid entropy (non-modal/unknown realized N) cannot be
+                # compared against the modal-grid threshold — leave the flag
+                # None with the reason, never silently mislabel (R3.3).
+                low = None
+                low_reason = "realized_n_off_modal_grid"
+            else:
+                low = ((e is not None and thr is not None and e <= thr)
+                       if thr is not None else None)
+                low_reason = None
             kb, cb = table_b[i]["k"], table_b[i]["n_resolved"]
-            off_mode.append({"instance_id": i, "post_search_entropy": e,
-                             "low_entropy": low,
-                             "treatment_k": table_a[i]["k"],
-                             "treatment_n_resolved": table_a[i]["n_resolved"],
-                             "vanilla_k": kb, "vanilla_n_resolved": cb})
+            rec = {"instance_id": i, "post_search_entropy": e,
+                   "low_entropy": low,
+                   "realized_n": (realized_n or {}).get(i),
+                   "treatment_k": table_a[i]["k"],
+                   "treatment_n_resolved": table_a[i]["n_resolved"],
+                   "vanilla_k": kb, "vanilla_n_resolved": cb}
+            if low_reason:
+                rec["low_entropy_reason"] = low_reason
+            off_mode.append(rec)
     result["off_mode_recovery_candidates"] = off_mode
     result["note"] = ("off_mode_recovery with low_entropy=True is the §0.1 case-3 "
                       "mode-collapse signature the entropy gate cannot predict. "
@@ -584,8 +680,9 @@ def main() -> None:
         print(f"  selected-pass@1 (majority signature): {selected_b['selected_pass_at_1']}")
 
         entropy = load_entropy(args.results_dir, set(table_a) | set(table_b))
+        realized_n = load_realized_n(args.results_dir, set(table_a) | set(table_b))
         comp = compare(table_a, table_b, entropy, args.seed, args.entropy_split,
-                       preds_a=preds_a, preds_b=preds_b)
+                       preds_a=preds_a, preds_b=preds_b, realized_n=realized_n)
         report["comparison"] = comp
         g = comp["diverse_pass_at_k_gain"]
         print(f"\n=== {args.label_a} − {args.label_b} ===")
@@ -626,6 +723,10 @@ def main() -> None:
                       f"-> H2 status: {fam['H2_coverage']['status']}")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
+        ge = comp.get("strata_grid_excluded") or {}
+        if ge.get("non_modal_n") or ge.get("unknown_n"):
+            print(f"  WARNING — excluded from entropy strata (off the modal "
+                  f"N={comp['strata_modal_n']} quantization grid, R3.3): {ge}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]
         print(f"  off-mode recovery (low-entropy, treatment-only pass): {len(omr)} instance(s) "
               f"{[o['instance_id'] for o in omr]}")
