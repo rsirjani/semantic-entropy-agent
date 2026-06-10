@@ -6,9 +6,26 @@ import pytest
 
 from src.evaluation.metrics import (
     bootstrap_ci, distinct_patch_count, diverse_pass_at_k, expected_distinct_at_k,
-    mean_pairwise_distance, normalize_patch, paired_permutation_pvalue, pass_at_k,
-    patch_signature, select_majority_patch,
+    mean_pairwise_distance, min_achievable_sign_flip_p, normalize_patch,
+    paired_permutation_pvalue, pass_at_k, patch_signature, select_majority_patch,
 )
+
+
+def test_min_achievable_sign_flip_p_power_floor():
+    # No zeros: p >= 2^(1-n).
+    assert math.isclose(min_achievable_sign_flip_p([1.0] * 10), 2 ** -9)
+    # z zeros among n: p >= 2^(1+z-n). At n=10 with 5 ties the test can NEVER
+    # reach p < 0.05 (floor = 2^-4 = 0.0625) — the design's power disclosure.
+    assert math.isclose(min_achievable_sign_flip_p([1, 1, 1, 1, 1, 0, 0, 0, 0, 0]),
+                        0.0625)
+    # 6 same-signed nonzero gains is the smallest m with floor < 0.05 at n=10
+    # ... and the realized exact p actually attains the floor there.
+    gains = [1, 1, 1, 1, 1, 1, 0, 0, 0, 0]
+    assert math.isclose(min_achievable_sign_flip_p(gains), 0.03125)
+    assert math.isclose(paired_permutation_pvalue(gains), 0.03125)
+    # All-zero input: floor clamps to 1 (the test trivially returns 1).
+    assert min_achievable_sign_flip_p([0.0, 0.0]) == 1.0
+    assert min_achievable_sign_flip_p([]) is None
 
 
 def test_pass_at_k_known_values():

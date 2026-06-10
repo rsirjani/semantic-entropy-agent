@@ -1,12 +1,28 @@
-"""Evaluate all trajectory patches from a branching run individually.
+"""Evaluate every trajectory patch from a run, writing an arm-isolated eval record.
 
-For each trajectory, writes a temporary single-prediction JSONL and runs
-SWE-bench evaluation. Reports pass/fail per trajectory and computes
-diverse-pass@1 (did ANY trajectory solve it?).
+Metric-correctness contract (R4.1/R7.2 — this file is the producer of the
+`trajectory_eval_<instance>.json` artifacts every metric script consumes):
+
+  1. The eval record contains EXACTLY ONE row per genuine trajectory, so the
+     metric-time (n, c) of the Chen estimator counts what the arm actually
+     produced. Duplicate patches are evaluated once for compute, but every
+     duplicate trajectory inherits its representative's outcome (identical
+     patches resolve identically; marked `deduped_from`). Empty patches are
+     never sent to Docker but count as `resolved: false` draws — a resample
+     that produced nothing still spent budget. Dropping duplicates or empties
+     would deflate k for whichever arm produced them — for the vanilla arm,
+     duplicates ARE the mode-collapse signal under study.
+  2. Output is written into the ARM'S OWN results dir (`--results-dir`), never
+     a hardcoded path, so evaluating the control can never overwrite the
+     treatment's eval files (R2.5 results isolation).
+  3. The best-of "primary" prediction row (null trajectory_id) is normalized to
+     trajectory_id "primary" so the metric layer's primary-drop rule sees it.
 
 Usage:
-    python scripts/eval_all_trajectories.py --instance sympy__sympy-12481
-    python scripts/eval_all_trajectories.py --predictions results/branching/predictions_all_trajectories.jsonl --instance sympy__sympy-12481
+    python scripts/eval_all_trajectories.py --results-dir results/strategy_t0.7 \
+        --instance sympy__sympy-12481
+    python scripts/eval_all_trajectories.py --results-dir results/resample_t0.7 \
+        --instance sympy__sympy-12481
 """
 
 import json
@@ -23,11 +39,17 @@ if sys.platform == "win32":
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-from src.evaluation.run_eval import run_evaluation
-
 
 def load_latest_trajectories(predictions_path: str, instance_id: str) -> list[dict]:
-    """Extract the latest run's trajectory predictions for a given instance."""
+    """Extract the latest run's trajectory predictions for a given instance.
+
+    Branching runs prepend a best-of "primary" row (null trajectory_id) per run,
+    so runs split into batches at those rows and the LAST batch is the latest
+    run. The resample driver writes no primary rows — a re-run without
+    --skip-existing appends duplicate (instance, trajectory_id) rows into one
+    batch — so within the final batch we keep the LAST occurrence per
+    trajectory_id (consistent with compute_metrics.load_predictions keep-last).
+    """
     with open(predictions_path) as f:
         lines = [json.loads(l) for l in f if l.strip()]
 
@@ -47,11 +69,15 @@ def load_latest_trajectories(predictions_path: str, instance_id: str) -> list[di
     if current:
         batches.append(current)
 
-    return batches[-1]  # Latest run
+    latest = batches[-1]
+    by_tid: dict[str, dict] = {}
+    for l in latest:
+        by_tid[l.get("trajectory_id") or "primary"] = l
+    return [by_tid[t] for t in by_tid]  # insertion order, last occurrence wins
 
 
 def deduplicate_patches(trajectories: list[dict]) -> list[dict]:
-    """Remove trajectories with duplicate patches, keeping the first occurrence."""
+    """Unique non-empty patches, keeping the first trajectory bearing each."""
     seen = set()
     unique = []
     for t in trajectories:
@@ -99,9 +125,13 @@ def eval_single_trajectory(
     instance_id: str,
     run_id: str,
     timeout: int,
-    temp_dir: str | None = None,
+    temp_dir: str,
 ) -> dict:
     """Evaluate a single trajectory patch and return the result."""
+    # Heavy import deferred so the pure helpers above stay unit-testable
+    # without the swebench harness installed (R8.5 stage tests).
+    from src.evaluation.run_eval import run_evaluation
+
     # Write a single-prediction JSONL to a temp file
     pred = {
         "instance_id": instance_id,
@@ -110,13 +140,12 @@ def eval_single_trajectory(
     }
 
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".jsonl", delete=False,
-        dir=temp_dir or os.path.join(PROJECT_ROOT, "results", "branching")
+        mode="w", suffix=".jsonl", delete=False, dir=temp_dir
     ) as f:
         f.write(json.dumps(pred) + "\n")
         temp_path = f.name
 
-    tid = trajectory.get("trajectory_id", "primary")
+    tid = trajectory.get("trajectory_id") or "primary"
 
     try:
         print(f"\n{'─'*60}")
@@ -132,6 +161,7 @@ def eval_single_trajectory(
 
         # Check the report for pass/fail
         # Reports are at: logs/run_evaluation/{run_id}/{model_name}/{instance_id}/report.json
+        # (CWD-relative, matching where the swebench harness writes them.)
         report_path = os.path.join(
             "logs", "run_evaluation", run_id,
             trajectory['model_name_or_path'],
@@ -154,7 +184,7 @@ def eval_single_trajectory(
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Evaluate all trajectory patches from a branching run")
+    parser = argparse.ArgumentParser(description="Evaluate all trajectory patches from a run")
     parser.add_argument("--results-dir", default="results/branching",
                         help="Arm results dir: predictions are read from and the "
                              "trajectory_eval_<instance>.json is written into THIS dir, "
@@ -172,9 +202,10 @@ def main():
     if not os.path.isabs(results_dir):
         results_dir = os.path.join(PROJECT_ROOT, results_dir)
     if args.predictions is None:
-        args.predictions = os.path.join(results_dir, "predictions_all_trajectories.jsonl")
-
-    predictions_path = os.path.join(PROJECT_ROOT, args.predictions)
+        predictions_path = os.path.join(results_dir, "predictions_all_trajectories.jsonl")
+    else:
+        predictions_path = (args.predictions if os.path.isabs(args.predictions)
+                            else os.path.join(PROJECT_ROOT, args.predictions))
     if not os.path.exists(predictions_path):
         print(f"ERROR: {predictions_path} not found")
         sys.exit(1)
@@ -196,7 +227,7 @@ def main():
                   f"inherit their representative's outcome (metric n stays exact)")
 
     for t in to_evaluate:
-        tid = t.get("trajectory_id", "primary")
+        tid = t.get("trajectory_id") or "primary"
         print(f"  {tid:30s} {len(t['model_patch']):5d} chars")
 
     # Evaluate each unique patch; run_id is arm-scoped so logs from different
@@ -204,7 +235,7 @@ def main():
     arm_slug = os.path.basename(os.path.normpath(results_dir))
     evaluated: dict[str, dict] = {}
     for t in to_evaluate:
-        tid = t.get("trajectory_id", "primary")
+        tid = t.get("trajectory_id") or "primary"
         run_id = f"{arm_slug}_traj_{tid}"
         result = eval_single_trajectory(t, args.instance, run_id, args.timeout,
                                         temp_dir=results_dir)
@@ -227,8 +258,13 @@ def main():
         if r["resolved"]:
             n_pass += 1
 
+    # pass@1 is the GREEDY trajectory (t0/run0), not the best-of "primary" row.
+    by_tid = {r["trajectory_id"]: r for r in results}
+    greedy = by_tid.get("t0") or by_tid.get("run0")
+    greedy_resolved = bool(greedy["resolved"]) if greedy else None
     print(f"{'─'*60}")
-    print(f"  pass@1 (greedy):   {'PASS' if results[0]['resolved'] else 'FAIL'}")
+    print(f"  pass@1 (greedy t0): "
+          f"{'PASS' if greedy_resolved else 'FAIL' if greedy_resolved is not None else 'n/a'}")
     print(f"  diverse-pass@1:    {'PASS' if n_pass > 0 else 'FAIL'} ({n_pass}/{len(results)} trajectories)")
     print(f"{'='*60}")
 
@@ -241,7 +277,7 @@ def main():
             "instance_id": args.instance,
             "n_trajectories": len(results),
             "n_resolved": n_pass,
-            "pass_at_1": results[0]["resolved"],
+            "pass_at_1": greedy_resolved,
             "diverse_pass_at_1": n_pass > 0,
             "trajectories": results,
         }, f, indent=2)

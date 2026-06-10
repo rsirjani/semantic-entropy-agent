@@ -38,8 +38,8 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from src.evaluation.metrics import (
     bootstrap_ci, diverse_pass_at_k, distinct_patch_count, expected_distinct_at_k,
-    mean_pairwise_distance, paired_permutation_pvalue, pass_at_k,
-    select_majority_patch,
+    mean_pairwise_distance, min_achievable_sign_flip_p, paired_permutation_pvalue,
+    pass_at_k, patch_signature, select_majority_patch,
 )  # distinct_patch_count is reused by set_valued_evidence below
 
 import numpy as np
@@ -50,36 +50,60 @@ import numpy as np
 # --------------------------------------------------------------------------- #
 
 def load_predictions(path: str) -> dict[str, list[str]]:
-    """instance_id -> list of trajectory patches (drops the duplicated 'primary')."""
-    by_instance: dict[str, list[str]] = {}
-    for iid, traj_id, patch in _iter_trajectory_predictions(path):
-        by_instance.setdefault(iid, []).append(patch)
-    return by_instance
+    """instance_id -> list of trajectory patches (drops the duplicated 'primary').
 
-
-def _iter_trajectory_predictions(path: str):
-    """Yield (instance_id, trajectory_id, patch) for genuine trajectory rows.
-
-    The best-of duplicate ("primary") row carries no trajectory_id and is skipped
-    so it is never double-counted against the per-trajectory rows.
+    Run-batch aware (see load_predictions_by_tid): only the LATEST run's rows
+    count, and within it the last occurrence per trajectory_id wins.
     """
+    return {iid: list(by_tid.values())
+            for iid, by_tid in load_predictions_by_tid(path).items()}
+
+
+def load_predictions_by_tid(path: str) -> dict[str, dict[str, str]]:
+    """instance_id -> {trajectory_id: patch}, restricted to the LATEST run.
+
+    Mirrors eval_all_trajectories.load_latest_trajectories so the predictions
+    the metrics see are exactly the trajectories the eval record scores:
+
+    - Branching runs prepend a best-of "primary" row (no trajectory_id) per
+      run, so each instance's rows split into run-batches at those rows and
+      only the LAST batch counts. Keep-last-per-tid alone is NOT enough: a
+      re-run that produced FEWER trajectories (fewer clusters) would leave
+      the old run's orphan tids in the diversity pool, inflating n, the
+      rarefaction denominator, and the pairwise-distance set with stale
+      patches the eval record (correctly batch-split) never scores.
+    - The resample driver writes no primary rows (one batch); a re-run
+      without --skip-existing appends duplicate (iid, tid) rows, so within
+      the final batch the LAST occurrence per trajectory_id wins.
+    """
+    rows_by_iid: dict[str, list[dict]] = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
+            rows_by_iid.setdefault(rec["instance_id"], []).append(rec)
+
+    out: dict[str, dict[str, str]] = {}
+    for iid, rows in rows_by_iid.items():
+        batches: list[list[dict]] = []
+        current: list[dict] = []
+        for rec in rows:
+            if rec.get("trajectory_id") in (None, "primary") and current:
+                batches.append(current)
+                current = []
+            current.append(rec)
+        if current:
+            batches.append(current)
+        by_tid: dict[str, str] = {}
+        for rec in batches[-1]:
             tid = rec.get("trajectory_id")
             if tid is None or tid == "primary":
                 continue
-            yield rec["instance_id"], tid, (rec.get("model_patch", "") or "")
-
-
-def load_predictions_by_tid(path: str) -> dict[str, dict[str, str]]:
-    """instance_id -> {trajectory_id: patch} for joining patches to eval outcomes."""
-    out: dict[str, dict[str, str]] = {}
-    for iid, traj_id, patch in _iter_trajectory_predictions(path):
-        out.setdefault(iid, {})[traj_id] = patch
+            by_tid[tid] = rec.get("model_patch", "") or ""
+        if by_tid:
+            out[iid] = by_tid
     return out
 
 
@@ -94,7 +118,10 @@ def load_eval(eval_path: str) -> dict[str, list[bool]]:
     Drops the best-of duplicate ("primary") trajectory so the matched-k count n
     reflects only GENUINE trajectories — consistent with load_predictions, which
     skips the same duplicate. (Counting primary would inflate n by 1 and bias the
-    Chen et al. matched-k estimate.)
+    Chen et al. matched-k estimate.) A null trajectory_id is the same best-of
+    row unnormalized and is dropped too — load_eval_by_tid already dropped None,
+    and the two loaders disagreeing on n would silently desync the coverage
+    table from every tid-joined analysis.
     """
     out: dict[str, list[bool]] = {}
     for fp in _eval_files(eval_path):
@@ -107,7 +134,7 @@ def load_eval(eval_path: str) -> dict[str, list[bool]]:
         if not iid:
             continue
         out[iid] = [bool(t.get("resolved")) for t in d.get("trajectories", [])
-                    if t.get("trajectory_id") != "primary"]
+                    if t.get("trajectory_id") not in (None, "primary")]
     return out
 
 
@@ -162,6 +189,12 @@ def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
     Strategy arm: the `Entropy:` line in <results_dir>/<iid>/phased_decisions.log.
     SDLG arm fallback: the first `entropy` in <results_dir>/<iid>/branching_log.json.
     Missing → instance omitted (treated as 'unknown' downstream).
+
+    The decisions log is APPEND-mode: a re-run of the same instance into the
+    same results dir adds a second STRATEGY PROPOSAL block, while the
+    predictions loader keeps the LAST run's rows and metadata.json is
+    overwritten. The LAST `Entropy:` match is therefore the one consistent
+    with the trajectories being scored — the first would be stale.
     """
     out: dict[str, float] = {}
     if not results_dir:
@@ -171,9 +204,9 @@ def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
         if os.path.isfile(log):
             try:
                 with open(log, "r", encoding="utf-8") as f:
-                    m = _ENTROPY_RE.search(f.read())
-                if m:
-                    out[iid] = float(m.group(1))
+                    matches = _ENTROPY_RE.findall(f.read())
+                if matches:
+                    out[iid] = float(matches[-1])
                     continue
             except Exception:
                 pass
@@ -261,9 +294,15 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
         "diverse_pass_at_k_gain": {"mean": round(pt, 4), "ci95": [round(lo, 4), round(hi, 4)]},
         # Exact paired sign-flip test (all 2^n sign patterns at n<=20): the
         # primary small-n inference, more trustworthy than a percentile
-        # bootstrap over lumpy 0/1 gains at n=10.
+        # bootstrap over lumpy 0/1 gains at n=10. min_achievable_p is the
+        # floor the zero pattern imposes (p >= 2^(1+z-n)): if it exceeds 0.05
+        # the test could not have reached significance no matter the direction
+        # of the nonzero gains — a power disclosure, so a null is never read
+        # as evidence of no effect when it is merely too many ties.
         "paired_sign_flip_p": (round(paired_permutation_pvalue(gains, seed=seed), 5)
                                if gains else None),
+        "min_achievable_p": (round(min_achievable_sign_flip_p(gains), 5)
+                             if gains else None),
         "k_mismatch_instances": k_mismatch,
         "instances_only_in_a": sorted(set(table_a) - set(table_b)),
         "instances_only_in_b": sorted(set(table_b) - set(table_a)),
@@ -271,9 +310,15 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
 
     # Rarefied diversity at the same common k*: raw distinct counts rise
     # mechanically with sample size, so cross-arm diversity differences use the
-    # rarefaction estimator E[#distinct in a random k*-subset].
+    # rarefaction estimator E[#distinct in a random k*-subset]. This is the
+    # H1 (diversity / mode-collapse) endpoint of the fixed-sequence
+    # confirmatory family (R6.5): it gets the same exact sign-flip test and
+    # power floor as the coverage gain, plus PER-ARM rarefied levels so the
+    # results table can show each arm's diversity at the common k*, not only
+    # the difference.
     if preds_a is not None and preds_b is not None:
-        rare_diffs = []
+        rare_diffs, rare_a, rare_b = [], [], []
+        ne_diffs, ne_frac_a, ne_frac_b = [], [], []
         for i in usable:
             pa, pb = preds_a.get(i, []), preds_b.get(i, [])
             if not pa or not pb:
@@ -281,14 +326,61 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
             k_star = min(table_a[i]["k"], table_b[i]["k"], len(pa), len(pb))
             if k_star <= 0:
                 continue
-            rare_diffs.append(expected_distinct_at_k(pa, k_star)
-                              - expected_distinct_at_k(pb, k_star))
+            ra = expected_distinct_at_k(pa, k_star)
+            rb = expected_distinct_at_k(pb, k_star)
+            rare_a.append(ra)
+            rare_b.append(rb)
+            rare_diffs.append(ra - rb)
+            # Productivity-confound diagnostics: an empty patch lowers the
+            # rarefied distinct count exactly like a duplicate, so an H1 "win"
+            # could in principle be a patch-PRODUCTION-rate gap, not a
+            # diversity gap. Report each arm's non-empty fraction, and a
+            # DESCRIPTIVE robustness row computed over non-empty patches only
+            # at k*_ne = min(#nonempty_a, #nonempty_b): if the headline H1
+            # gain survives there, it is diversity among produced solutions,
+            # not productivity.
+            ne_a = [p for p in pa if p.strip()]
+            ne_b = [p for p in pb if p.strip()]
+            ne_frac_a.append(len(ne_a) / len(pa))
+            ne_frac_b.append(len(ne_b) / len(pb))
+            k_ne = min(len(ne_a), len(ne_b))
+            if k_ne > 0:
+                ne_diffs.append(expected_distinct_at_k(ne_a, k_ne)
+                                - expected_distinct_at_k(ne_b, k_ne))
         if rare_diffs:
             rpt, rlo, rhi = bootstrap_ci(rare_diffs, np.mean, seed=seed)
+            apt, alo, ahi = bootstrap_ci(rare_a, np.mean, seed=seed)
+            bpt, blo, bhi = bootstrap_ci(rare_b, np.mean, seed=seed)
             result["rarefied_distinct_gain"] = {
                 "mean": round(rpt, 4), "ci95": [round(rlo, 4), round(rhi, 4)],
                 "n": len(rare_diffs),
+                "paired_sign_flip_p": round(
+                    paired_permutation_pvalue(rare_diffs, seed=seed), 5),
+                "min_achievable_p": round(
+                    min_achievable_sign_flip_p(rare_diffs), 5),
             }
+            result["rarefied_distinct_at_k_star"] = {
+                "arm_a": {"mean": round(apt, 4), "ci95": [round(alo, 4), round(ahi, 4)]},
+                "arm_b": {"mean": round(bpt, 4), "ci95": [round(blo, 4), round(bhi, 4)]},
+            }
+            result["nonempty_patch_fraction"] = {
+                "arm_a": round(float(np.mean(ne_frac_a)), 4),
+                "arm_b": round(float(np.mean(ne_frac_b)), 4),
+            }
+            result["rarefied_distinct_gain_nonempty"] = (
+                {
+                    "mean": round(float(np.mean(ne_diffs)), 4),
+                    "n": len(ne_diffs),
+                    "paired_sign_flip_p": round(
+                        paired_permutation_pvalue(ne_diffs, seed=seed), 5),
+                    "min_achievable_p": round(
+                        min_achievable_sign_flip_p(ne_diffs), 5),
+                    "note": ("DESCRIPTIVE robustness row (not the confirmatory "
+                             "endpoint): rarefied distinct gain over non-empty "
+                             "patches only, at k*_ne = min nonempty count — "
+                             "separates diversity-among-produced-solutions from "
+                             "the patch-production rate."),
+                } if ne_diffs else None)
 
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
     # `thr` is computed ONCE here and reused for the R5.4 low-entropy flag below so
@@ -359,6 +451,7 @@ def selected_pass_at_1(predictions_path: str, eval_path: str) -> dict:
     evals = load_eval_by_tid(eval_path)
     per_instance: dict[str, dict] = {}
     outcomes: list[float] = []
+    n_degenerate = 0
     for iid in sorted(set(preds) & set(evals)):
         tids = [t for t in preds[iid] if t in evals[iid]]
         if not tids:
@@ -371,13 +464,31 @@ def selected_pass_at_1(predictions_path: str, eval_path: str) -> dict:
             continue
         tid = tids[sel]
         resolved = bool(evals[iid][tid])
-        per_instance[iid] = {"selected_tid": tid, "resolved": resolved}
+        # Degeneracy disclosure: when every non-empty signature is unique
+        # (multiplicity 1), "majority" carries no information — the pick is the
+        # earliest-seen tie-break. On the BRANCHING arm this is the typical
+        # case BY CONSTRUCTION (one trajectory per semantic cluster), so its
+        # selected-pass@1 is closer to first-trajectory-pass@1 than to true
+        # self-consistency; the vanilla arm's resamples carry real multiplicity.
+        winner_sig = patch_signature(patches[sel])
+        winner_mult = sum(1 for p in patches if patch_signature(p) == winner_sig)
+        degenerate = winner_mult <= 1
+        n_degenerate += int(degenerate)
+        per_instance[iid] = {"selected_tid": tid, "resolved": resolved,
+                             "majority_multiplicity": winner_mult,
+                             "degenerate_tiebreak": degenerate}
         outcomes.append(1.0 if resolved else 0.0)
     return {
         "selector": "majority normalized-patch signature (self-consistency)",
         "n_instances": len(outcomes),
         "selected_pass_at_1": (round(float(np.mean(outcomes)), 4)
                                if outcomes else None),
+        "n_degenerate_tiebreak_instances": n_degenerate,
+        "degeneracy_note": (
+            "degenerate_tiebreak=True means all non-empty signatures were "
+            "unique, so the 'majority' pick was pure earliest-seen tie-break. "
+            "Expected often on the branching arm (clusters are deduplicated by "
+            "construction); compare selectors in that light."),
         "per_instance": per_instance,
     }
 
@@ -437,16 +548,32 @@ def main() -> None:
         report["comparison"] = comp
         g = comp["diverse_pass_at_k_gain"]
         print(f"\n=== {args.label_a} − {args.label_b} ===")
-        print(f"  diverse-pass@k* gain (metric-time matched k): {g['mean']}  "
+        print(f"  [H2/coverage] diverse-pass@k* gain (metric-time matched k): {g['mean']}  "
               f"CI95={g['ci95']}  (n={comp['n_compared_instances']})")
-        print(f"  exact paired sign-flip p: {comp['paired_sign_flip_p']}")
+        print(f"  [H2/coverage] exact paired sign-flip p: {comp['paired_sign_flip_p']}  "
+              f"(power floor given ties: min achievable p = {comp['min_achievable_p']})")
         if comp["k_mismatch_instances"]:
             print(f"  WARNING — per-instance k mismatch on "
                   f"{len(comp['k_mismatch_instances'])} instance(s); compared at "
                   f"k*=min(k_a,k_b): {comp['k_mismatch_instances']}")
         if "rarefied_distinct_gain" in comp:
             r = comp["rarefied_distinct_gain"]
-            print(f"  rarefied distinct-patch gain @k*: {r['mean']}  CI95={r['ci95']}")
+            print(f"  [H1/diversity] rarefied distinct-patch gain @k*: {r['mean']}  "
+                  f"CI95={r['ci95']}  sign-flip p={r['paired_sign_flip_p']}  "
+                  f"(min achievable p = {r['min_achievable_p']})")
+            ra = comp["rarefied_distinct_at_k_star"]
+            print(f"  [H1/diversity] per-arm rarefied distinct @k*: "
+                  f"{args.label_a}={ra['arm_a']['mean']} CI95={ra['arm_a']['ci95']}, "
+                  f"{args.label_b}={ra['arm_b']['mean']} CI95={ra['arm_b']['ci95']}")
+            nef = comp.get("nonempty_patch_fraction")
+            ner = comp.get("rarefied_distinct_gain_nonempty")
+            if nef:
+                print(f"  [H1 diagnostics] non-empty patch fraction: "
+                      f"{args.label_a}={nef['arm_a']}, {args.label_b}={nef['arm_b']}")
+            if ner:
+                print(f"  [H1 robustness, descriptive] non-empty-only rarefied gain "
+                      f"@k*_ne: {ner['mean']}  sign-flip p={ner['paired_sign_flip_p']} "
+                      f"(n={ner['n']})")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]

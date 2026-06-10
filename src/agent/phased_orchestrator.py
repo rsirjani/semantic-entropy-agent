@@ -49,6 +49,43 @@ from src.utils.tracer import PipelineTracer
 logger = logging.getLogger(__name__)
 
 
+def collect_patch_entries(trajectories, strategies_by_tid: dict) -> list[dict]:
+    """One patch entry per GENUINE DRAW — every trajectory that consumed agent
+    budget (status 'completed' OR 'failed'), in creation order, with patch ""
+    when none was captured.
+
+    Metric-correctness contract (R4.1/R7.2, predictions-record completeness):
+    the per-trajectory predictions file is built from these entries, and the
+    eval record's (n, c) is built from the predictions — so a draw that is
+    dropped HERE vanishes from the arm's matched-k denominator. The vanilla
+    resample driver writes an empty-patch row for every failed/unproductive
+    resample; dropping the treatment's failed/patchless trajectories (the old
+    behavior: only completed trajectories with non-empty patches) would
+    asymmetrically deflate the treatment's k and inflate its diverse-pass@k*
+    and rarefied-distinct numbers at metric time. It also silently discarded
+    real patches captured on 'failed' trajectories (silent data loss, R7.2).
+
+    Excluded statuses: 'active' (an interrupted run — not a finished draw; the
+    run is incomplete and must be re-run, not scored) and 'branched' (a legacy
+    branching_orchestrator parent whose budget continues in its children).
+    """
+    entries = []
+    for traj in trajectories:
+        if traj.status not in ("completed", "failed"):
+            continue
+        entries.append({
+            "trajectory_id": traj.trajectory_id,
+            "patch": traj.patch or "",
+            "submitted": traj.submitted,
+            "status": traj.status,
+            "steps": traj.step,
+            "parent_id": traj.parent_id,
+            "strategy": strategies_by_tid.get(traj.trajectory_id, ""),
+            "branch_info": traj.branch_info,
+        })
+    return entries
+
+
 class PhasedOrchestrator:
     """Orchestrates multi-trajectory agent with strategy-level branching."""
 
@@ -658,7 +695,7 @@ class PhasedOrchestrator:
             input={"search_report": search_report,
                    "problem_statement": self.problem_statement[:500],
                    "n_strategies": self.proposer.n_strategies,
-                   "temperature": 1.0},
+                   "temperature": self.proposer.temperature},
             phase="STRATEGY_PROPOSAL", trajectory_id="t0",
         )
 
@@ -745,6 +782,33 @@ class PhasedOrchestrator:
         self._log_strategy_proposal(strategies, clusters, entropy, unique_strategies)
         return unique_strategies
 
+    def _register_failed_draw(
+        self, traj_id: str, parent_id: str | None, branch_info: dict,
+        env=None,
+    ) -> Trajectory:
+        """Record a draw that failed at CREATION as a failed placeholder (R7.2).
+
+        A fork the orchestrator decided to make is a genuine draw even if the
+        container / clone / injection failed before it could run: the vanilla
+        resample driver records its run-loop failures as empty-patch rows, so
+        the treatment must count its failed creations under the same rule —
+        dropping them would deflate the treatment's metric-time k (the same
+        pro-treatment direction as the iteration-6 producer fix, one layer
+        earlier). The placeholder has no agent; any half-created container is
+        reaped immediately.
+        """
+        traj = Trajectory(
+            trajectory_id=traj_id, agent=None, env=env, parent_id=parent_id,
+            status="failed", branch_info=dict(branch_info, creation_failed=True),
+        )
+        self.manager.trajectories[traj_id] = traj
+        try:
+            traj.cleanup()
+        except Exception:
+            pass
+        logger.warning(f"Registered failed-at-creation draw {traj_id} (R7.2)")
+        return traj
+
     def _create_lazy_trajectory(
         self, strategy: str, index: int,
     ) -> Trajectory | None:
@@ -754,10 +818,13 @@ class PhasedOrchestrator:
         Uses the saved search messages template (no need to clone from a
         running container — search phase doesn't modify files).
         Only 1 container exists at a time = safe within 32GB VRAM.
-        """
-        try:
-            traj_id = f"t0_strategy_{index}"
 
+        On failure the strategy's draw is registered as a failed placeholder
+        (see _register_failed_draw) — never silently skipped.
+        """
+        traj_id = f"t0_strategy_{index}"
+        new_env = None
+        try:
             # Build env config — image is already set correctly by run_branching.py
             env_config = dict(self.env_config)
 
@@ -792,6 +859,12 @@ class PhasedOrchestrator:
 
         except Exception as e:
             logger.error(f"Failed to create trajectory for strategy {index}: {e}", exc_info=True)
+            self.trajectory_strategies[traj_id] = strategy
+            self._register_failed_draw(
+                traj_id, "t0",
+                {"type": "strategy", "strategy": strategy[:200]},
+                env=new_env,
+            )
             return None
 
     def _inject_strategy_prompt(self, traj: Trajectory, strategy: str) -> None:
@@ -1066,6 +1139,11 @@ class PhasedOrchestrator:
             alt_content = unique_alts[rep_idx]
 
             new_traj = self._clone_for_sdlg(traj, alt_content, fork_index)
+            # The fork index advances on EVERY attempt: _clone_for_sdlg always
+            # registers a draw under this index (active, completed-at-injection,
+            # or failed placeholder — R7.2), so reusing the index would
+            # overwrite that record.
+            fork_index += 1
             if new_traj:
                 self.tracer.log(
                     "phase3.sdlg.fork_created",
@@ -1078,7 +1156,6 @@ class PhasedOrchestrator:
                     phase="SDLG", trajectory_id=new_traj.trajectory_id, step=traj.step,
                 )
                 forked.append(new_traj)
-                fork_index += 1
 
         # Log the SDLG event
         self.manager.branching_log.append({
@@ -1096,10 +1173,43 @@ class PhasedOrchestrator:
 
         return forked
 
+    @staticmethod
+    def _inject_alternative(agent, alt_content: str) -> tuple[str, bool, str]:
+        """Execute an injected SDLG alternative; classify the draw's outcome.
+
+        Returns (status, submitted, patch). The alternative response can itself
+        contain the submit command — execute_actions then raises Submitted, and
+        that is a COMPLETED draw with a real (possibly passing) patch which must
+        be kept. Before this helper, a blanket clone-failure handler swallowed
+        the exception and the child vanished from the record entirely (silent
+        data loss against the treatment) while its container leaked. A
+        non-Submitted execution error is a FAILED draw — still a draw (R7.2).
+        """
+        try:
+            agent.inject_and_execute(alt_content)
+            return "active", False, ""
+        except Submitted as e:
+            agent.add_messages(*e.messages)
+            patch = e.messages[0].get("extra", {}).get("submission", "")
+            return "completed", True, patch
+        except Exception as e:
+            logger.error(f"Injected SDLG alternative failed to execute: {e}")
+            return "failed", False, ""
+
     def _clone_for_sdlg(
         self, parent: Trajectory, alt_content: str, index: int,
     ) -> Trajectory | None:
-        """Clone a strategy trajectory for an SDLG alternative response."""
+        """Clone a strategy trajectory for an SDLG alternative response.
+
+        ALWAYS leaves a draw record under t<parent>_sdlg_<index> (R7.2): an
+        'active' child for the run loop, a 'completed' child if the injected
+        alternative submitted immediately, or a 'failed' placeholder/child if
+        cloning or injection failed. Returns the trajectory only when it still
+        needs to run (status 'active'); the caller must advance its fork index
+        regardless, since the id is taken in every case.
+        """
+        traj_id = f"{parent.trajectory_id}_sdlg_{index}"
+        new_env = None
         try:
             from src.utils.docker_helpers import clone_container_state
 
@@ -1119,39 +1229,59 @@ class PhasedOrchestrator:
             new_agent.n_calls = parent.agent.n_calls
             new_agent.cost = parent.agent.cost
             new_agent.extra_template_vars = copy.deepcopy(parent.agent.extra_template_vars)
-
-            # Inject the SDLG alternative response and execute it
-            new_agent.inject_and_execute(alt_content)
-
-            traj_id = f"{parent.trajectory_id}_sdlg_{index}"
-            traj = Trajectory(
-                trajectory_id=traj_id,
-                agent=new_agent,
-                env=new_env,
-                parent_id=parent.trajectory_id,
-                branch_step=parent.step,
-                status="active",
-                step=parent.step,
-                last_branch_step=parent.step,
-                branch_info={"type": "sdlg", "rank": index},
-            )
-
-            self.manager.trajectories[traj_id] = traj
-            self.trajectory_phases[traj_id] = self.trajectory_phases.get(
-                parent.trajectory_id, Phase.PATCH
-            )
-            # Inherit the parent's strategy assignment
-            parent_strategy = self.trajectory_strategies.get(parent.trajectory_id, "")
-            self.trajectory_strategies[traj_id] = parent_strategy
-            # Mark as already SDLG'd so we don't re-apply
-            setattr(traj, "_sdlg_applied", True)
-
-            logger.info(f"Created SDLG sub-trajectory {traj_id} from {parent.trajectory_id}")
-            return traj
-
         except Exception as e:
             logger.error(f"Failed to clone for SDLG {index}: {e}", exc_info=True)
+            self._register_failed_draw(
+                traj_id, parent.trajectory_id, {"type": "sdlg", "rank": index},
+                env=new_env,
+            )
             return None
+
+        # Inject the SDLG alternative response and execute it (may submit/fail)
+        status, submitted, patch = self._inject_alternative(new_agent, alt_content)
+
+        traj = Trajectory(
+            trajectory_id=traj_id,
+            agent=new_agent,
+            env=new_env,
+            parent_id=parent.trajectory_id,
+            branch_step=parent.step,
+            status=status,
+            step=parent.step,
+            last_branch_step=parent.step,
+            submitted=submitted,
+            patch=patch,
+            branch_info={"type": "sdlg", "rank": index},
+        )
+
+        self.manager.trajectories[traj_id] = traj
+        self.trajectory_phases[traj_id] = self.trajectory_phases.get(
+            parent.trajectory_id, Phase.PATCH
+        )
+        # Inherit the parent's strategy assignment
+        parent_strategy = self.trajectory_strategies.get(parent.trajectory_id, "")
+        self.trajectory_strategies[traj_id] = parent_strategy
+        # Mark as already SDLG'd so we don't re-apply
+        setattr(traj, "_sdlg_applied", True)
+
+        if status != "active":
+            # Finished (or died) at injection: capture any working-tree diff a
+            # failed injection left behind, then reap the container now — the
+            # run loop only iterates 'active' children.
+            if status == "failed":
+                self._capture_patch_if_missing(traj)
+            try:
+                traj.cleanup()
+            except Exception:
+                pass
+            logger.info(
+                f"SDLG sub-trajectory {traj_id} finished at injection: "
+                f"status={status} submitted={submitted} patch={len(traj.patch or '')}ch"
+            )
+            return None
+
+        logger.info(f"Created SDLG sub-trajectory {traj_id} from {parent.trajectory_id}")
+        return traj
 
     # ---- Phase 4: VERIFY ----
 
@@ -1433,7 +1563,12 @@ class PhasedOrchestrator:
             f.write(f"\n{'='*70}\n")
             f.write(f"STRATEGY PROPOSAL\n")
             f.write(f"Proposed: {len(strategies)} | Clusters: {len(clusters)} | ")
-            f.write(f"Unique: {len(unique_strategies)} | Entropy: {entropy:.3f}\n")
+            # 6 decimals: the post-hoc tau sweep compares this against achievable-
+            # entropy grid values at the gate boundary; 3 decimals can round
+            # ACROSS the boundary (e.g. partition (2,2,1) of 5: 1.054920 -> 1.055
+            # > 1.0549). tau_sweep.py additionally recomputes the exact value
+            # from the cluster partition, but the logged value should not lie.
+            f.write(f"Unique: {len(unique_strategies)} | Entropy: {entropy:.6f}\n")
             f.write(f"{'='*70}\n")
             for i, s in enumerate(strategies):
                 cluster_id = "?"
@@ -1453,19 +1588,11 @@ class PhasedOrchestrator:
 
     def _collect_results(self, elapsed: float, total_steps: int) -> dict:
         completed = self.manager.completed_trajectories
-        patches = []
-        for traj in completed:
-            if traj.patch:
-                patch_entry = {
-                    "trajectory_id": traj.trajectory_id,
-                    "patch": traj.patch,
-                    "submitted": traj.submitted,
-                    "steps": traj.step,
-                    "parent_id": traj.parent_id,
-                    "strategy": self.trajectory_strategies.get(traj.trajectory_id, ""),
-                    "branch_info": traj.branch_info,
-                }
-                patches.append(patch_entry)
+        # One entry per genuine draw (completed OR failed; patch may be "") —
+        # see collect_patch_entries for the metric-correctness contract.
+        patches = collect_patch_entries(
+            self.manager.trajectories.values(), self.trajectory_strategies,
+        )
 
         results = {
             "instance_id": self.instance_id,

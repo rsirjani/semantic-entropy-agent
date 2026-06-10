@@ -208,7 +208,13 @@ deviation from a paper is intentional and documented (not a bug).
   discrete entropy takes only partition-of-N values (7 values at N=5), so τ is a
   cluster-partition-shape rule at small N, and the admissible τ grid is the
   achievable-entropy set, not a continuous dial. N must be held fixed across arms
-  and instances for τ/strata comparability (plug-in entropy bias varies with K, N).
+  and instances for τ/strata comparability (plug-in entropy bias varies with K, N)
+  — and because the proposer can under-deliver (<N parsed strategies), the
+  **realized** N must be reported per instance with non-modal-N instances flagged
+  and excluded from pooled τ/strata analyses, never silently mixed across
+  quantization grids. Gate reconstruction must compare at full precision
+  (recompute entropy from the logged cluster partition; a rounded log value can
+  cross a gate boundary).
 
 *Pass:* each ablation either has results, or is explicitly de-scoped in the
 writeup with justification.
@@ -224,7 +230,17 @@ writeup with justification.
   both arms at the common per-instance k\* = min(k_A, k_B) via the Chen estimator
   and reports every k-mismatched instance — failed resamples, `--max-k` caps, or
   capture losses must never silently hand the larger arm a mechanical any-pass
-  advantage.
+  advantage. **Eval-record completeness:** the per-arm eval artifacts must contain
+  exactly ONE row per genuine trajectory — duplicate patches may be evaluated once
+  for compute, but every duplicate trajectory inherits its representative's
+  outcome (marked as propagated), and empty patches count as failed draws without
+  a container run — because the Chen estimator's (n, c) must count what the arm
+  *produced*. The vanilla arm's duplicate patches are the mode-collapse signal
+  itself; an eval step that drops them deflates vanilla's k and silently
+  subsamples the treatment's coverage at the shrunken k\*. Metric loaders must
+  drop the best-of duplicate row consistently whether its trajectory id is
+  `"primary"` or null, and all post-hoc parsers of append-mode run logs must read
+  the LAST run's block (re-runs append; predictions/metadata reflect the last run).
 - **R4.2 — Diversity measured INDEPENDENTLY of the branching signal.** The
   diversity of the final outputs must NOT be measured with the same DeBERTa-NLI
   clustering used to *decide* branching (circular). Use an independent metric over
@@ -233,14 +249,24 @@ writeup with justification.
   must exist as a runnable script over the predictions artifacts. Cross-arm
   distinct-count differences at unequal sample counts must use a rarefaction
   estimator (expected distinct in a random k\*-subset) — raw distinct counts rise
-  mechanically with sample size.
+  mechanically with sample size. **Productivity-confound diagnostics:** an empty
+  patch lowers the rarefied distinct count exactly like a duplicate, so a
+  diversity "gain" can masquerade for a patch-production-rate gap; the comparison
+  must report each arm's non-empty patch fraction and a descriptive non-empty-only
+  rarefied-gain robustness row (computed at k\*_ne = min non-empty count), fixed
+  before the runs, and the writeup must state the exact-signature granularity
+  (lexical variants count as distinct in both arms) with its bias direction.
 - **R4.3 — Diversity measured on FINAL patches, not proposal-time branches**
   (branches can converge downstream).
 - **R4.4 (strengthening, not blocker) — Selection-aware accuracy:** a *deployable*
   selector — one computable from the run artifacts alone (e.g. majority vote over
   normalized final-patch signatures with deterministic tie-breaks), no hidden
   tests, no oracle — → `selected-pass@1` on both arms, so the paper does not
-  overclaim the oracle number.
+  overclaim the oracle number. The selector's arm-asymmetry must be disclosed:
+  on the branching arm patches are one-per-cluster by construction, so a
+  majority-signature vote typically degenerates to its tie-break — the analysis
+  must report how often (degenerate-tiebreak count per arm), and must not invent
+  additional selectors after seeing results.
 
 ---
 
@@ -296,17 +322,32 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 - **R6.2 — Scope claims match the data:** claims are scoped to the instance set
   actually run (currently 10 easy SymPy; goal: full SWE-bench Lite). No
   generalization beyond what was measured.
-- **R6.5 — Pre-registered primary endpoint (multiple-comparison control):** the
-  sweep × arms × ablations grid is many cells; exactly ONE comparison is named
-  confirmatory *before* the GPU runs (currently: strategy-proposal, greedy, τ=0
-  superset vs matched-k vanilla at T=0.7, matched-k\* diverse-pass@k gain, exact
-  sign-flip test). Every other cell — temperatures, SDLG, clustering/τ ablations,
-  entropy strata, off-mode candidates — is labeled exploratory/descriptive in the
-  writeup. Changing the primary after seeing results is forbidden; if the runs
-  motivate a different primary, that is reported as a post-hoc finding.
+- **R6.5 — Pre-registered confirmatory family (multiple-comparison control):** the
+  sweep × arms × ablations grid is many cells; exactly ONE comparison **cell** is
+  named confirmatory *before* the GPU runs (currently: strategy-proposal, greedy,
+  τ=0 superset vs matched-k vanilla at T=0.7). Within that cell, the two halves of
+  the §0 headline form a **fixed-sequence (gatekeeping) family** at family-wise
+  α=0.05: **H1 = rarefied distinct-patch gain at matched k\*** (the diversity /
+  mode-collapse half — the title claim), then **H2 = matched-k\* diverse-pass@k
+  gain**, each with the exact sign-flip test, H2 confirmatory **only if H1
+  rejects** (otherwise H2 is descriptive). The order is fixed by the causal chain
+  (coverage can only move through diversity), not by the data; it makes the
+  coverage claim strictly harder than a lone H2 endpoint while giving the §0
+  diversity claim — previously descriptive-only — a confirmatory test. Every other
+  cell — temperatures, SDLG, clustering/τ ablations, entropy strata, off-mode
+  candidates — is labeled exploratory/descriptive in the writeup. Changing the
+  family or its order after seeing results is forbidden; if the runs motivate a
+  different endpoint, that is reported as a post-hoc finding. **Power floor
+  disclosure required:** the exact sign-flip p has a tie-imposed floor
+  p ≥ 2^(1+z−n) (z = zero gains); the analysis must report this
+  (`min_achievable_p`) beside every sign-flip p so a null is never presented as
+  evidence of no effect when the test could not have rejected.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
-  manufacture wins), and per-arm token/compute accounting reported.
+  manufacture wins), and per-arm token/compute accounting reported — with any
+  systematic exclusions (calls not stored in the per-trajectory transcripts, e.g.
+  the strategy proposer and NLI passes) disclosed alongside, including which arm
+  the exclusion favors.
 - **R6.4 — Threats to validity** enumerated and either addressed or acknowledged
   (cherry-picked difficulty band, single repo, oracle selection, n).
 
@@ -317,7 +358,35 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 - **R7.1** One documented command per arm reproduces its predictions; configs are
   checked in; the NLI/vLLM/Docker prerequisites are documented.
 - **R7.2** No silent data loss: every completed trajectory's patch is captured
-  before container teardown; predictions JSONL schema is documented and stable.
+  before container teardown; predictions JSONL schema is documented and stable;
+  the evaluation step writes its per-instance eval records into the **arm's own
+  results dir** (no hardcoded shared default — evaluating one arm must not be
+  able to overwrite another arm's eval files), and every genuine trajectory of
+  the run appears in the eval record (see R4.1 eval-record completeness).
+  **Predictions-record completeness (one layer up):** the eval record is built
+  from the per-trajectory predictions file, so the run drivers in EVERY arm
+  must write **one prediction row per genuine draw** — a trajectory that
+  failed or produced no diff still consumed budget and must appear as an
+  empty-patch row, exactly as the resample driver records its unproductive
+  resamples (a patch captured on a *failed* trajectory must likewise not be
+  discarded). Dropping an arm's own unproductive draws deflates that arm's
+  metric-time k and inflates its diverse-pass@k\* and rarefied-distinct levels
+  against the other arm. Post-hoc loaders must be **run-batch aware**: on a
+  re-run that produced fewer trajectories, rows from the superseded run must
+  not survive into the diversity pool (score only the last primary-delimited
+  batch, matching the eval driver), and the matched-k driver must warn when a
+  treatment metadata's per-trajectory entries disagree with its
+  `total_trajectories` (old-driver or interrupted artifact).
+  **Draw accounting starts at the fork decision:** a fork that fails at
+  *creation* (container/clone/injection error) is still a genuine draw and
+  must be recorded as a failed empty-patch trajectory — exactly as the
+  resample driver records a crashed resample — never silently skipped; a
+  branch whose injected response *submits* during creation is a completed
+  draw whose patch must be captured, never discarded. Artifacts without
+  batch delimiters (the resample arm's all-trajectories file has no
+  best-of rows to split on) must be made re-run-safe at the **producer** —
+  per-instance row replacement — since no parser-side last-batch rule can
+  isolate a smaller-k re-run there.
 - **R7.3** Figures/tables are regenerable from the predictions artifacts by a
   checked-in script.
 - **R7.4** Determinism knobs (seeds where applicable, model/temperature, package

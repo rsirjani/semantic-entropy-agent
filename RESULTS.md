@@ -130,12 +130,40 @@ comparison (fewer vanilla trajectories) would favor the treatment and is **not**
 used. `scripts/budget_audit.py` reports per-arm token totals so the realized
 asymmetry is quantified, not assumed.
 
-**Pre-registered primary endpoint (multiple-comparison control).** The sweep ×
-arms × ablations grid has many cells; exactly ONE comparison is confirmatory, fixed
-before the GPU runs: **strategy-proposal (greedy clustering, τ=0 superset run) vs
-matched-k vanilla at T = 0.7**, metric = per-instance matched-k* `diverse-pass@k`
-gain, tested with the **exact paired sign-flip test** (n=10 → all 1024 sign
-patterns). T = 0.7 sits below the T≈0.9 knee where whole-agent decoding precision
+**Pre-registered confirmatory family (multiple-comparison control).** The sweep ×
+arms × ablations grid has many cells; exactly ONE comparison cell is confirmatory,
+fixed before the GPU runs: **strategy-proposal (greedy clustering, τ=0 superset
+run) vs matched-k vanilla at T = 0.7**. Within that cell the headline claim has two
+halves, tested as a **fixed-sequence (hierarchical, gatekeeping) family** that
+mirrors the causal chain and controls family-wise error at α = 0.05 without
+splitting alpha:
+
+- **H1 — diversity (the title claim, mode collapse):** per-instance rarefied
+  distinct-patch gain at matched k\* (treatment − vanilla), exact paired sign-flip
+  test. If H1 is not significant, the mode-collapse premise is not confirmed and
+  H2 is reported as descriptive only.
+- **H2 — coverage (tested only if H1 rejects):** per-instance matched-k\*
+  `diverse-pass@k` gain, exact paired sign-flip test (n=10 → all 1024 sign
+  patterns).
+
+The order is fixed by the science, not by the data: branching can only raise
+coverage *through* producing distinct solutions, so confirming coverage without
+confirming diversity would be uninterpretable. The hierarchy makes the coverage
+claim *strictly harder* than under a single-endpoint design (it now needs its own
+p < 0.05 **and** H1 upstream), while giving the diversity claim — which §1 says is
+the headline — a confirmatory test it previously lacked.
+
+**Power disclosure (decided before the runs).** The exact sign-flip p-value has a
+hard floor set by ties: with z zero gains among n instances, p ≥ 2^(1+z−n). At
+n = 10, **p < 0.05 requires at least 6 instances with a nonzero, same-direction
+difference**; e.g. a "treatment wins on 4, ties on 6" outcome bottoms out at
+p = 0.125 *no matter how clean the wins are*. `compute_metrics.py` reports this
+floor (`min_achievable_p`) next to every p-value so an insignificant result is
+read correctly: it may reflect ties/power, not evidence of no effect. The 0/1
+coverage gain is expected to produce many ties on easy instances; the
+near-continuous H1 diversity gain is not — another reason H1 leads the sequence.
+
+T = 0.7 sits below the T≈0.9 knee where whole-agent decoding precision
 degrades (EntroPO Fig. 4), so the primary cannot manufacture a win out of vanilla
 decoding degradation at T = 1.0. All other cells (T = 0.2/1.0, SDLG arm, clustering
 and τ ablations, entropy strata) are **exploratory/descriptive**. One required
@@ -164,6 +192,15 @@ reported, not hidden.
   1.332, 1.609} nats — so τ at this N is a **cluster-partition-shape rule**, not a
   continuous dial (τ=0 ≡ "branch iff ≥2 clusters"). The sweep grid is exactly the
   achievable set; the paper says this rather than implying a smooth threshold.
+  Two precision/validity details the sweep enforces: (i) entropies are recomputed
+  **exactly from the logged cluster partition** (the rounded `Entropy:` log line
+  can cross a gate boundary — e.g. partition (2,2,1) is 1.054920…, which a
+  3-decimal log rounds to 1.055 > 1.0549), falling back to the logged value, with
+  the source flagged, when the two disagree (kernel runs); (ii) the **realized**
+  candidate count N is reported per instance — the proposer can return fewer than
+  the configured 5 strategies — and instances whose N deviates from the modal N
+  are flagged (`non_modal_n_instances`) because their entropies sit on a
+  different quantization grid and must not be pooled silently.
 
 ### 2.4 Documented deviations from the reference methods (R1.1)
 
@@ -204,6 +241,68 @@ These are deliberate, disclosed deviations — not bugs:
 All metrics are pure post-processing over the predictions/eval artifacts
 (`src/evaluation/metrics.py`, no GPU/NLI/Docker):
 
+- **Eval-record completeness (the metric inputs' contract).** The per-arm
+  `trajectory_eval_<iid>.json` files are produced by
+  `scripts/eval_all_trajectories.py`, which (i) writes into the **arm's own
+  results dir** (`--results-dir`), so evaluating the control can never
+  overwrite the treatment's eval files; (ii) emits **exactly one row per
+  genuine trajectory** — duplicate patches are evaluated once for compute but
+  every duplicate inherits its representative's outcome (identical patches
+  resolve identically; marked `deduped_from`), and **empty patches count as
+  `resolved: false` draws** without a Docker run. This is load-bearing for the
+  Chen estimator: its (n, c) must count what the arm actually *produced*. The
+  vanilla arm's duplicate patches ARE the mode-collapse signal under study —
+  an eval record that deduplicated them would deflate vanilla's k, shrink the
+  matched k\*, and silently subsample the treatment's coverage while the
+  vanilla arm kept plain any-pass. Re-runs are safe end-to-end: the eval
+  driver and the metric loaders both keep the **last** occurrence per
+  (instance, trajectory), and entropy/partition parsers read the **last**
+  `STRATEGY PROPOSAL` block of the append-mode decisions log.
+- **Predictions-record completeness (the contract one layer up).** The eval
+  record is built *from* `predictions_all_trajectories.jsonl`, so completeness
+  must hold there too: the branching driver writes **one prediction row per
+  genuine trajectory — including failed and patchless draws as empty-patch
+  rows** (`run_branching.build_predictions`,
+  `phased_orchestrator.collect_patch_entries`), exactly as the resample driver
+  writes an empty row for every unproductive resample. Before this fix the
+  treatment driver silently dropped trajectories that failed or produced no
+  diff (on the real pilot, 5 of 10 instances had fewer prediction rows than
+  trajectories), which would have deflated the treatment's metric-time k —
+  e.g. a treatment with 1 pass among 5 draws but only 2 recorded rows scores
+  pass@k\*(2,1)=1.0 against vanilla's pass@2(5,1)=0.4, a +0.6 "gain"
+  manufactured entirely by dropping the treatment's own duds — and made the
+  `nonempty_patch_fraction` diagnostic structurally ≈1.0 for the treatment arm
+  (its empty draws never reached the artifact). Both arms now count
+  unproductive draws identically; run-loop failures are failed draws in both.
+  The metric loaders are run-batch aware: a branching **re-run that produces
+  fewer trajectories** cannot leave the prior run's orphan rows in the
+  diversity pool (`load_predictions_by_tid` scores only the last
+  primary-delimited batch, mirroring the eval driver), and the resample driver
+  warns when a treatment `metadata.json`'s patch entries disagree with
+  `total_trajectories` (old-driver or interrupted artifact).
+- **Draw accounting starts at the fork decision (iteration-7 extension).** The
+  contract above covered trajectories that *exist* in the run record; the fork
+  paths could still lose draws **at creation**. (i) A strategy or SDLG fork
+  whose container/clone/injection fails is registered as a **failed
+  empty-patch draw** (`phased_orchestrator._register_failed_draw`) — exactly
+  as the resample driver records a crashed resample — instead of being
+  silently skipped, which would deflate the treatment's metric-time k (the
+  same pro-treatment direction as the predictions-record fix, one layer
+  earlier). (ii) An SDLG alternative that **submits during injection** raises
+  `Submitted` inside the clone step; previously the blanket clone-failure
+  handler swallowed it, discarding a completed — possibly passing — child and
+  leaking its container. It is now recorded as a completed, submitted draw
+  with its patch kept (`_inject_alternative`). (iii) The **resample**
+  all-trajectories file has no batch delimiters (no "primary" rows), so the
+  parsers' last-batch rule cannot isolate a re-run there; the driver therefore
+  **replaces the instance's rows on re-run** (`replace_instance_rows`,
+  mirroring its primary file) so a smaller-k re-run cannot leave stale surplus
+  resamples in the vanilla arm's k and diversity pool. All three are
+  stage-tested (`tests/test_end_to_end_mocked.py`), alongside a mocked
+  end-to-end chain test from synthetic trajectories through
+  `collect_patch_entries → build_predictions → eval loaders →
+  compute_metrics.compare`.
+
 - **Coverage — `diverse-pass@k`** via the **unbiased Chen et al. (2021)** estimator on
   *both* arms at matched k. Framed honestly as an **oracle upper bound**, not
   deployable accuracy. **Matched k is enforced at metric time, not only at run
@@ -220,13 +319,37 @@ All metrics are pure post-processing over the predictions/eval artifacts
   `expected_distinct_at_k` (expected #distinct in a random k\*-subset — the same
   hypergeometric identity as Chen) because raw distinct counts rise mechanically with
   sample size; mean pairwise distance needs no correction (expected subset mean =
-  full mean, by pair-inclusion symmetry).
+  full mean, by pair-inclusion symmetry). **Two known properties of the H1 endpoint,
+  disclosed before the runs:** (i) *granularity* — the exact signature counts
+  lexical variants (e.g. a renamed variable) as distinct in BOTH arms; since the
+  whole-agent-sampling vanilla arm is, if anything, the noisier producer of trivial
+  variants, this inflates the *control's* distinct count more and biases H1 toward
+  the null (conservative for the diversity claim; the graded pairwise distance and
+  the roadmap behavioral metric complement it). (ii) *productivity confound* — an
+  empty patch lowers the rarefied distinct count exactly like a duplicate, so an H1
+  win could in principle reflect a patch-*production*-rate gap rather than
+  diversity; `compute_metrics.py` therefore reports each arm's
+  `nonempty_patch_fraction` and a **descriptive robustness row**
+  (`rarefied_distinct_gain_nonempty`: the same rarefied gain over non-empty patches
+  only, at k\*_ne = min non-empty count). If the confirmatory H1 rejects but the
+  non-empty-only row shows ≈0 gain alongside a large production-rate gap, the paper
+  reports the win as productivity, not mode-collapse escape. This row is fixed now,
+  pre-data, and does not alter the confirmatory endpoint.
 - **Selection-aware accuracy (R4.4) — implemented:** `selected-pass@1` under the
   **majority normalized-patch-signature selector** (self-consistency over final
   patches; ties → earliest seen; empty patches never win; all-empty counts as a
   miss). Deployable by construction — it reads only the predictions artifacts, no
   hidden tests, no NLI — so the oracle row is never presented alone
-  (`scripts/compute_metrics.py::selected_pass_at_1`).
+  (`scripts/compute_metrics.py::selected_pass_at_1`). **Known asymmetry,
+  disclosed:** on the branching arm the trajectories are one-per-semantic-cluster
+  *by construction*, so final patches are typically all-distinct and "majority"
+  degenerates to the earliest-seen tie-break — closer to first-trajectory-pass@1
+  than to true self-consistency; the vanilla arm's resamples carry real
+  multiplicity. The script reports `degenerate_tiebreak` per instance and
+  `n_degenerate_tiebreak_instances` per arm so the two selected-pass@1 numbers are
+  read in that light, and the NLI-side alternative (keep only the dominant
+  cluster's trajectory) is already reported as the largest-τ row of the τ sweep —
+  no extra selector is invented post-hoc.
 - **Uncertainty (R6.1):** every headline number carries a **bootstrap CI** over
   instances (`bootstrap_ci`, seeded for reproducibility), and the primary endpoint
   additionally carries the **exact paired sign-flip p-value**
@@ -273,6 +396,12 @@ python scripts/run_branching.py --config configs/branching.yaml \
 # Matched-k vanilla control at the SAME temperature:
 python scripts/run_resample_baseline.py --treatment-dir results/strategy_t0.7 \
     --results-dir results/resample --temperatures 0.7
+# Evaluate EVERY trajectory of each arm into the arm's OWN dir (one row per
+# genuine trajectory: duplicates propagate, empty patches count as failures):
+for IID in $(jq -r .instance_id results/strategy_t0.7/predictions.jsonl); do
+  python scripts/eval_all_trajectories.py --results-dir results/strategy_t0.7 --instance $IID
+  python scripts/eval_all_trajectories.py --results-dir results/resample_t0.7 --instance $IID
+done
 # Metrics + R5 analysis:
 python scripts/compute_metrics.py \
     --predictions results/strategy_t0.7/predictions_all_trajectories.jsonl \
@@ -297,15 +426,24 @@ artifacts. On the existing `results/branching` run this already yields ~12.9 M t
 tokens over 53 trajectories with **0** passing branches above the 250-step baseline
 cap (max passing = 164 steps), so the step-limit asymmetry did not manufacture wins.
 Cost in $ is omitted only because the local vLLM model is unregistered for litellm
-cost calculation; tokens and steps are the compute proxies.
+cost calculation; tokens and steps are the compute proxies. **Known undercount,
+disclosed:** the treatment arm's strategy-proposer call, intent-extraction
+sub-calls, and DeBERTa-NLI forward passes are not stored in the per-trajectory
+`.traj.json` transcripts and are excluded from these sums — the exclusion is
+bounded (one proposer call and O(N²)=10 NLI pair passes of a 0.4B model per
+instance, vs k full agent trajectories) and works *against* the fairness claim's
+margin rather than for it, since the structural argument (vanilla pays k full
+SEARCHes, the treatment one shared SEARCH) rests on the trajectory sums, which
+dominate by orders of magnitude.
 
 | Metric (n=10 easy SymPy) | Matched-k vanilla | Strategy-proposal | SDLG |
 |---|---|---|---|
 | diverse-pass@k\* (Chen, oracle) ± CI | _pending_ | _pending_ | _pending_ |
 | distinct final patches (rarefied @k\*) ± CI | _pending_ | _pending_ | _pending_ |
 | mean pairwise patch distance ± CI | _pending_ | _pending_ | _pending_ |
-| selected-pass@1 (majority signature) | _pending_ | _pending_ | _pending_ |
-| primary gain: exact sign-flip p (T=0.7 only) | — | _pending_ | _exploratory_ |
+| selected-pass@1 (majority signature; degenerate-tiebreak count disclosed) | _pending_ | _pending_ | _pending_ |
+| H1 (confirmatory): rarefied distinct gain @k\*, sign-flip p + min-achievable p (T=0.7) | — | _pending_ | _exploratory_ |
+| H2 (confirmatory iff H1 rejects): diverse-pass@k\* gain, sign-flip p + min-achievable p (T=0.7) | — | _pending_ | _exploratory_ |
 
 Gain (treatment − vanilla) with bootstrap CI, and the per-entropy-stratum / off-mode
 breakdown, are emitted by the same command into the `comparison` block of the output JSON.
@@ -325,8 +463,14 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    not deployable accuracy. *Addressed:* framed explicitly as oracle/coverage, and the
    selection-aware `selected-pass@1` (R4.4) is reported alongside so we never present the
    oracle number as accuracy.
-4. **Small n.** n = 10 → wide CIs. *Addressed:* every number carries a bootstrap CI
-   (R6.1); we do not over-read point estimates.
+4. **Small n / power floor.** n = 10 → wide CIs, and the exact sign-flip test has a
+   hard tie-imposed floor p ≥ 2^(1+z−n): with z zero gains, p < 0.05 needs ≥6
+   same-direction nonzero gains. On easy instances the 0/1 coverage gain (H2) will
+   often tie, so an insignificant H2 is *expected under low power*, not evidence of
+   no effect. *Addressed:* every number carries a bootstrap CI (R6.1);
+   `min_achievable_p` is reported next to every sign-flip p; the better-powered,
+   near-continuous diversity gain (H1) leads the confirmatory sequence; we do not
+   over-read point estimates.
 5. **Budget-fairness / step-limit asymmetry.** `max_search_steps` (240) sits below the
    per-trajectory `step_limit` (300), and lazy strategy trajectories reset to step 0, so
    they can in principle use more patch steps than the baseline's 250 total. *Addressed:*
@@ -340,7 +484,11 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
 7. **Independent-diversity proxy.** Structural (AST-free, line-level) diversity may over-
    or under-count behaviorally-equivalent patches. *Acknowledged:* it is deliberately
    **not** the branching NLI (avoids circularity, R4.2); a behavioral-diversity check is
-   a roadmap item.
+   a roadmap item. Two sub-risks are measured rather than assumed (§3): the exact
+   signature's lexical granularity (bias direction: toward the null — the
+   whole-agent-sampling control produces trivial variants at least as readily), and
+   the productivity confound (an H1 win that is really a patch-production-rate gap
+   is exposed by `nonempty_patch_fraction` + the non-empty-only robustness row).
 8. **Instance-set deviation from the proposal (disclosure).** Proposal Appendix C
    committed to a *difficulty-spanning* SymPy set (sympy-12481 plus nine instances
    rated <15 min up to >4 hr) to test whether branching helps more on harder
@@ -356,10 +504,15 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    semantic entropy takes only 7 partition-quantized values, the plug-in estimator is
    biased low (Miller–Madow ≈ (K−1)/2N nats, up to ~0.4 nats at K=5), and the τ gate
    is effectively a cluster-partition-shape rule. *Addressed:* the gate and strata
-   are defined on the plug-in value with N **held fixed** (n_strategies =
+   are defined on the plug-in value with N **fixed by config** (n_strategies =
    sdlg_n_alternatives = 5) across arms and instances, so within-experiment
    comparisons are consistent; absolute entropy values are never interpreted across
    different N; `scripts/tau_sweep.py` reports the achievable-τ grid explicitly.
+   *Residual risk, measured not assumed:* the proposer can under-deliver (<5
+   parsed strategies), silently putting that instance on a different quantization
+   grid — the τ sweep therefore reports the **realized** N per instance and flags
+   `non_modal_n_instances`; any such instance is excluded from τ/strata pooling and
+   disclosed.
 10. **Strata and off-mode candidates are descriptive at n=10.** A median split
     leaves ~5 instances per entropy stratum, and a single "treatment passed, vanilla
     0/k" instance can be sampling noise (P(0 of k) = (1−p)^k). *Addressed:* only the
@@ -367,7 +520,23 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
     (R5.2) and off-mode records (R5.4) are reported as descriptive evidence with both
     arms' (k, n_resolved) attached, and off-mode claims require replication across
     temperatures before being asserted.
-11. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
+11. **Gate-signal saturation.** In the pilot run every instance's five strategy
+   proposals clustered **all-singleton** (entropy = ln 5 ≈ 1.609, the maximum of
+   the achievable grid), so the τ gate was degenerate there: any τ < ln 5 means
+   always-branch, and the entropy signal carries information only if the NLI
+   clustering actually merges some intent summaries at the configured
+   entailment threshold (**0.7**, `configs/branching.yaml` — raised pre-pilot
+   from 0.5 to prevent over-merging, which cuts the other way: a higher
+   threshold merges *less*, making all-singleton saturation *more* likely;
+   the no-retune rule below applies to this knob too). *Measured, not
+   assumed:* the τ sweep reports
+   every instance's realized partition and the achievable grid, so saturation
+   is visible in the artifacts. If the pre-registered runs reproduce it, the
+   paper reports the gate as uninformative at this substrate/threshold — a
+   negative finding about the adaptive gate, not a license to retune τ or the
+   entailment threshold post-hoc (any retuned configuration is a new,
+   exploratory cell).
+12. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
    (Fig. 5) shows prompting "give me a different answer" with prior answers in
    context recovers much diversity in open-ended NL. We do not run this arm;
    defenses: our setting is multi-turn and action-constrained, the strategy-proposal
@@ -389,9 +558,9 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
 - **No silent data loss (R7.2):** every completed trajectory's patch is captured before
   container teardown (`_capture_patch_if_missing`, source-only, no-overwrite of a real
   submission) — covering the three completion paths that previously dropped diffs.
-- Tables are regenerable from the predictions artifacts by `scripts/compute_metrics.py`
-  (R7.3). *Known gap:* a checked-in **figure** script (plots from the same JSON) is a
-  `next_actions` item.
+- Tables are regenerable from the predictions artifacts by `scripts/compute_metrics.py`,
+  and figures by `scripts/make_figures.py` from the same JSON (R7.3; rendering
+  covered by `tests/test_budget_and_figures.py`).
 - Determinism knobs (model id, temperature, bootstrap seed, package versions) are
   recorded with the results; the base model is config-selected end-to-end (R9.1), so a
   different model family can be plugged with no code edits.

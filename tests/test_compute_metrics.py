@@ -166,8 +166,71 @@ def test_compare_reports_sign_flip_p_and_rarefied_distinct(tmp_path):
                       preds_a=preds_a, preds_b=preds_b)
     # Two paired gains of +1 -> exact sign-flip p = 2/4 = 0.5.
     assert abs(comp["paired_sign_flip_p"] - 0.5) < 1e-9
+    # Power floor: no zero gains among n=2 -> min achievable p = 2^(1-2) = 0.5.
+    assert abs(comp["min_achievable_p"] - 0.5) < 1e-9
     # Rarefied distinct gain at k*=2: treatment 2 distinct, vanilla 1 -> +1.
     assert abs(comp["rarefied_distinct_gain"]["mean"] - 1.0) < 1e-9
+    # H1 (diversity) endpoint carries its own exact test + power floor + levels.
+    assert abs(comp["rarefied_distinct_gain"]["paired_sign_flip_p"] - 0.5) < 1e-9
+    assert abs(comp["rarefied_distinct_gain"]["min_achievable_p"] - 0.5) < 1e-9
+    assert abs(comp["rarefied_distinct_at_k_star"]["arm_a"]["mean"] - 2.0) < 1e-9
+    assert abs(comp["rarefied_distinct_at_k_star"]["arm_b"]["mean"] - 1.0) < 1e-9
+
+
+def test_load_predictions_dedupes_rerun_appends(tmp_path):
+    """Re-running the resample driver appends duplicate (iid, tid) rows; the
+    loader must keep the LAST occurrence, never inflate n."""
+    p = tmp_path / "dup.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "OLD", "trajectory_id": "run0"},
+        {"instance_id": "i1", "model_patch": "B", "trajectory_id": "run1"},
+        {"instance_id": "i1", "model_patch": "NEW", "trajectory_id": "run0"},  # re-run
+    ])
+    preds = cm.load_predictions(str(p))
+    assert sorted(preds["i1"]) == ["B", "NEW"]   # 2 trajectories, last run0 wins
+
+
+def test_load_predictions_drops_orphan_tids_from_prior_branching_run(tmp_path):
+    """A branching re-run that produced FEWER trajectories (fewer clusters)
+    must not leave the old run's orphan tids in the diversity pool: the eval
+    driver scores only the LAST primary-delimited batch, so the predictions
+    loader must do the same — keep-last-per-tid alone would keep the stale
+    t0_strategy_2 patch, inflating n, the rarefaction denominator, and the
+    pairwise-distance set with a patch the eval record never scores."""
+    p = tmp_path / "orphan.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "OLD_BEST"},                     # run 1 primary
+        {"instance_id": "i1", "model_patch": "OLD_A", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "OLD_B", "trajectory_id": "t0_strategy_1"},
+        {"instance_id": "i1", "model_patch": "OLD_C", "trajectory_id": "t0_strategy_2"},
+        {"instance_id": "i1", "model_patch": "NEW_BEST"},                     # run 2 primary
+        {"instance_id": "i1", "model_patch": "NEW_A", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "NEW_B", "trajectory_id": "t0_strategy_1"},
+    ])
+    by_tid = cm.load_predictions_by_tid(str(p))
+    assert by_tid["i1"] == {"t0": "NEW_A", "t0_strategy_1": "NEW_B"}
+    assert sorted(cm.load_predictions(str(p))["i1"]) == ["NEW_A", "NEW_B"]
+
+
+def test_selected_pass_at_1_flags_degenerate_tiebreak(tmp_path):
+    """On the branching arm all signatures are typically unique by construction;
+    the selector must DISCLOSE that 'majority' was a pure tie-break there."""
+    d = tmp_path / "edeg"
+    d.mkdir()
+    with open(os.path.join(str(d), "trajectory_eval_i1.json"), "w", encoding="utf-8") as f:
+        json.dump({"instance_id": "i1", "trajectories": [
+            {"trajectory_id": "t0", "resolved": True},
+            {"trajectory_id": "t1", "resolved": False},
+        ]}, f)
+    p = tmp_path / "pdeg.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+x=1\n", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+y=2\n", "trajectory_id": "t1"},
+    ])
+    out = cm.selected_pass_at_1(str(p), str(d))
+    row = out["per_instance"]["i1"]
+    assert row["majority_multiplicity"] == 1 and row["degenerate_tiebreak"] is True
+    assert out["n_degenerate_tiebreak_instances"] == 1
 
 
 def test_selected_pass_at_1_majority_signature(tmp_path):
@@ -202,3 +265,66 @@ def test_load_entropy_from_phased_decisions_log(tmp_path):
     )
     ent = cm.load_entropy(str(tmp_path), [iid])
     assert abs(ent[iid] - 0.901) < 1e-9
+
+
+def test_load_entropy_uses_last_block_after_rerun(tmp_path):
+    """phased_decisions.log is append-mode: a re-run adds a second STRATEGY
+    PROPOSAL block while predictions keep-last. Entropy must come from the
+    LAST block — the first is the stale run."""
+    iid = "sympy__sympy-2"
+    inst_dir = tmp_path / iid
+    inst_dir.mkdir()
+    (inst_dir / "phased_decisions.log").write_text(
+        "STRATEGY PROPOSAL\nProposed: 5 | Clusters: 3 | Unique: 3 | Entropy: 0.901\n"
+        "...\n"
+        "STRATEGY PROPOSAL\nProposed: 5 | Clusters: 2 | Unique: 2 | Entropy: 0.500\n",
+        encoding="utf-8",
+    )
+    ent = cm.load_entropy(str(tmp_path), [iid])
+    assert abs(ent[iid] - 0.500) < 1e-9
+
+
+def test_load_eval_drops_null_trajectory_id(tmp_path):
+    """A null trajectory_id is the unnormalized best-of row; load_eval must
+    drop it exactly like load_eval_by_tid does, or the coverage table's n
+    desyncs from every tid-joined analysis."""
+    d = tmp_path / "evalN"
+    d.mkdir()
+    with open(os.path.join(str(d), "trajectory_eval_i1.json"), "w", encoding="utf-8") as f:
+        json.dump({"instance_id": "i1", "trajectories": [
+            {"trajectory_id": None, "resolved": True},     # unnormalized primary
+            {"trajectory_id": "t0", "resolved": True},
+            {"trajectory_id": "t1", "resolved": False},
+        ]}, f)
+    assert cm.load_eval(str(d))["i1"] == [True, False]     # n=2, not 3
+
+
+def test_compare_nonempty_robustness_separates_productivity_from_diversity(tmp_path):
+    """H1 confound guard: arm A produces 2 distinct patches; arm B produces ONE
+    patch and one EMPTY. The raw rarefied gain is positive partly because B
+    failed to produce; the non-empty-only robustness row compares at
+    k*_ne = 1, where both arms show 1 distinct — gain 0."""
+    dA, dB = tmp_path / "neA", tmp_path / "neB"
+    dA.mkdir(); dB.mkdir()
+    _write_eval(str(dA), "i1", [False, False])
+    _write_eval(str(dB), "i1", [False, False])
+    pA, pB = tmp_path / "neA.jsonl", tmp_path / "neB.jsonl"
+    _write_predictions(pA, [
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+x=1\n", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+y=2\n", "trajectory_id": "t1"},
+    ])
+    _write_predictions(pB, [
+        {"instance_id": "i1", "model_patch": "@@ -1 +1 @@\n+z=3\n", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "", "trajectory_id": "t1"},   # empty
+    ])
+    preds_a, preds_b = cm.load_predictions(str(pA)), cm.load_predictions(str(pB))
+    ta = cm.per_instance_table(preds_a, cm.load_eval(str(dA)))
+    tb = cm.per_instance_table(preds_b, cm.load_eval(str(dB)))
+    comp = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                      preds_a=preds_a, preds_b=preds_b)
+    # Raw H1 at k*=2: A has E[distinct]=2; B has 1 (one signature, empty adds none).
+    assert abs(comp["rarefied_distinct_gain"]["mean"] - 1.0) < 1e-9
+    # Diagnostics expose the production gap and the non-empty-only null.
+    assert abs(comp["nonempty_patch_fraction"]["arm_a"] - 1.0) < 1e-9
+    assert abs(comp["nonempty_patch_fraction"]["arm_b"] - 0.5) < 1e-9
+    assert abs(comp["rarefied_distinct_gain_nonempty"]["mean"] - 0.0) < 1e-9
