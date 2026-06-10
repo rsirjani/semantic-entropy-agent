@@ -1,0 +1,65 @@
+diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
+index 8743723ea0..aca2dbdc33 100644
+--- a/sympy/printing/latex.py
++++ b/sympy/printing/latex.py
+@@ -696,41 +696,6 @@ def _print_Derivative(self, expr):
+                                                   PRECEDENCE["Mul"],
+                                                   strict=True))
+ 
+-    def _print_Subs(self, subs):
+-        expr, old, new = subs.args
+-        latex_expr = self._print(expr)
+-        latex_old = (self._print(e) for e in old)
+-        latex_new = (self._print(e) for e in new)
+-        latex_subs = r'\\ '.join(
+-            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
+-        return r'\left. %s \right|_{\substack{ %s }}' % (latex_expr,
+-                                                         latex_subs)
+-
+-    def _print_Integral(self, expr):
+-        tex, symbols = "", []
+-
+-        # Only up to \iiiint exists
+-        if len(expr.limits) <= 4 and all(len(lim) == 1 for lim in expr.limits):
+-            # Use len(expr.limits)-1 so that syntax highlighters don't think
+-            # \" is an escaped quote
+-            tex = r"\i" + "i"*(len(expr.limits) - 1) + "nt"
+-            symbols = [r"\, d%s" % self._print(symbol[0])
+-                       for symbol in expr.limits]
+-
+-        else:
+-            for lim in reversed(expr.limits):
+-                symbol = lim[0]
+-                tex += r"\int"
+-
+-                if len(lim) > 1:
+-                    if self._settings['mode'] != 'inline' \
+-                            and not self._settings['itex']:
+-                        tex += r"\limits"
+-
+-                    if len(lim) == 3:
+-                        tex += "_{%s}^{%s}" % (self._print(lim[1]),
+-                                               self._print(lim[2]))
+-                    if len(lim) == 2:
+                         tex += "^{%s}" % (self._print(lim[1]))
+ 
+                 symbols.insert(0, r"\, d%s" % self._print(symbol))
+@@ -2841,3 +2806,18 @@ def multiline_latex(lhs, rhs, terms_per_line=1, environment="align*", use_dots=F
+         term_count += 1
+     result += end_term
+     return result
++
++    def _print_Subs(self, subs):
++        expr, old, new = subs.args
++        latex_expr = self._print(expr)
++        latex_old = (self._print(e) for e in old)
++        latex_new = (self._print(e) for e in new)
++        latex_subs = r'\\ '.join(
++            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))
++        
++        # Fix: Properly parenthesize complex expressions like -x+y
++        # Check if expression needs parentheses (contains + or -)
++        if ('+' in latex_expr or '-' in latex_expr) and ('\\left(' not in latex_expr):
++            latex_expr = r'\\left(%s\\right)' % latex_expr
++        
++        return r'\\left. %s \\right|_{\\substack{ %s }}' % (latex_expr, latex_subs)

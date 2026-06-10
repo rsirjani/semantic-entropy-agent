@@ -713,15 +713,25 @@ class PhasedOrchestrator:
 
         # 3. Cluster strategies — pairwise NLI + bidirectional entailment.
         # Use the SAME context and threshold as the clusterer / the SDLG path so
-        # the logged pairwise decisions cannot desync from the actual clustering
-        # (meaning is context-conditioned per Kuhn et al. Algorithm 1).
-        cluster_context = self.problem_statement[:500]
+        # the logged pairwise decisions cannot desync from the actual clustering.
+        #
+        # DELIBERATE DEVIATION from Kuhn et al.'s context-conditioning: NO shared
+        # problem-statement prefix. Kuhn conditions entailment on the QA question
+        # to disambiguate context-DEPENDENT short answers ("Paris" vs "France");
+        # our strategies/intents are self-contained imperatives, and prepending a
+        # 500-char shared prefix to both sides SATURATES DeBERTa entailment —
+        # measured on the 2026-06-10 Phase A run-1 artifacts (sympy-12096): all
+        # 10 pairs of 5 structurally distinct strategies score >=0.94 WITH the
+        # prefix (-> 1 cluster, entropy 0, gate never fires) vs <=0.55 WITHOUT
+        # (-> 5 clusters). The gate was measuring the prefix, not the strategies.
+        # Reproduce with scripts/diagnose_context_saturation.py.
+        cluster_context = ""
         entail_thr = self.clusterer.threshold
         tau = cfg(self.branching_config, "entropy_threshold")
         for i in range(len(strategies)):
             for j in range(i + 1, len(strategies)):
-                a = f"{cluster_context} {strategies[i]}"
-                b = f"{cluster_context} {strategies[j]}"
+                a = f"{cluster_context} {strategies[i]}".strip()
+                b = f"{cluster_context} {strategies[j]}".strip()
                 fwd = self.nli.classify(a, b)
                 bwd = self.nli.classify(b, a)
                 same = fwd["entailment"] > entail_thr and bwd["entailment"] > entail_thr
@@ -1083,12 +1093,17 @@ class PhasedOrchestrator:
             phase="SDLG", trajectory_id=traj.trajectory_id, step=traj.step,
         )
 
-        # Step 3: Cluster via bidirectional entailment + compute entropy
+        # Step 3: Cluster via bidirectional entailment + compute entropy.
+        # context="" — same deliberate deviation as the strategy path: a shared
+        # problem-statement prefix saturates DeBERTa entailment and merges
+        # distinct intents into one cluster (see _propose_strategies and
+        # scripts/diagnose_context_saturation.py). Intents are prompted to be
+        # self-contained one-sentence summaries, so no conditioning is needed.
         entropy_threshold = cfg(self.branching_config, "entropy_threshold")
         analysis = self.clusterer.analyze(
             intents,
             tau=entropy_threshold,
-            context=self.problem_statement[:500],
+            context="",
         )
         clusters = analysis["clusters"]
         entropy = analysis["entropy"]

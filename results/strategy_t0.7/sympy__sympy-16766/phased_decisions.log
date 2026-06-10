@@ -1,0 +1,169 @@
+[t0] step 1 (SEARCH) relevance=0.700
+  THOUGHT: I need to explore the codebase to understand how PythonCodePrinter works and where the Indexed support should be added. Let me start by looking at the structure of the repository and finding relevant 
+  SUMMARY: The search found Python code files related to code generation utilities and tests in the SymPy library, which are relevant because they likely contain the `PythonCodePrinter` class and associated func
+  ACTION: find /testbed -type f -name "*.py" | grep -E "(printer|code)" | head -20
+
+[t0] step 2 (SEARCH) relevance=0.700
+  THOUGHT: Let me search more specifically for PythonCodePrinter and related files:
+  SUMMARY: The search found Python files related to code generation and printing utilities in the SymPy library, which are relevant because they likely contain the implementation of Python code generation functi
+  ACTION: find /testbed -type f -name "*.py" | xargs grep -l "PythonCodePrinter" | head -10
+
+[t0] step 3 (SEARCH) relevance=0.700
+  THOUGHT: Now let me look at the main PythonCodePrinter implementation:
+  SUMMARY: The search found the Python code printers module that contains implementations for generating Python code as well as NumPy & SciPy enabled code, which could be relevant if the debugging issue involves
+  ACTION: cat /testbed/sympy/printing/pycode.py
+
+[t0] step 4 (SEARCH) relevance=0.300
+  THOUGHT: Now let me also check what Indexed looks like in SymPy to understand the structure:
+  SUMMARY: The search found two Python files related to indexed expressions in SymPy - `indexed.py` and `indexed_integrals.py` - which are relevant because they likely contain the core implementation and integra
+  ACTION: find /testbed -type f -name "*.py" | xargs grep -l "class Indexed" | head -5
+
+[t0] step 5 (SEARCH) relevance=0.300
+  THOUGHT: Let me examine the Indexed class definition:
+  SUMMARY: The search found documentation for the Indexed class and related classes (IndexedBase, Idx) that represent matrix elements in a symbolic mathematics context, which is relevant because it explains how 
+  ACTION: cat /testbed/sympy/tensor/indexed.py | head -100
+
+[t0] step 6 (SEARCH) relevance=0.300
+  THOUGHT: Let me create a simple test to reproduce the issue first:
+  SUMMARY: The search found that the SymPy library is missing its required dependency 'mpmath', which is causing an import error when trying to use SymPy, making it relevant because this missing dependency is li
+  ACTION: cd /testbed && python -c "
+from sympy import *
+from sympy.printing.pycode import PythonCodePrinter
+p
+
+[t0] step 7 (SEARCH) relevance=0.300
+  THOUGHT: Let me install the dependencies and try a simpler approach:
+  SUMMARY: The search found that the SymPy library failed to import because the required 'mpmath' dependency is missing, which is relevant because it identifies the core dependency issue preventing the software 
+  ACTION: cd /testbed && python -c "
+import sys
+sys.path.insert(0, '.')
+from sympy.printing.pycode import Pyth
+
+[t0] step 8 (SEARCH) relevance=0.300
+  THOUGHT: Let me check if there's a simpler way to test this without importing everything:
+  SUMMARY: The search found that the SymPy library failed to import because the required 'mpmath' dependency is missing, which is relevant because it explains the import error and indicates a missing package ins
+  ACTION: cd /testbed && python -c "
+import sys
+sys.path.insert(0, '/testbed')
+import os
+os.environ['PYTHONPAT
+
+
+======================================================================
+STRATEGY PROPOSAL
+Proposed: 5 | Clusters: 1 | Unique: 1 | Entropy: 0.000000
+======================================================================
+  [1] cluster=0: `sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class — Add the method `def _print_Indexed(self, expr): base, *index = expr.args; return "{}[{}]".format(str(base), ", "
+  [2] cluster=0: `sympy/printing/codeprinter.py` - Modify `CodePrinter` base class to include generic indexed handling — Add a fallback mechanism in `CodePrinter._print` method that detects `Indexed` objects and deleg
+  [3] cluster=0: `sympy/core/indexed.py` - Extend `Indexed` class with custom code generation method — Add a new method `pycode` to the `Indexed` class that returns the proper Python indexing syntax instead of relying
+  [4] cluster=0: `sympy/printing/__init__.py` - Register a special printer mapping for `Indexed` objects — Modify the printer registration system to automatically map `Indexed` objects to a dedicated Python code gener
+  [5] cluster=0: `sympy/printing/python.py` - Create a specialized Python printer subclass — Create a new class `CustomPythonCodePrinter` that inherits from `PythonCodePrinter` and overrides only the `Indexed` handlin
+
+Unique strategies to fork:
+  → Strategy 0: `sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class — Add the method `def _print_Indexed(self, expr): base, *index = expr.args; return "{}[{}]".format(str(base), ", "
+
+[t0] step 10 (PATCH)
+  THOUGHT: I need to add the `_print_Indexed` method to the `PythonCodePrinter` class in `/testbed/sympy/printing/pycode.py`. Based on my exploration, I can see the file structure and I need to locate the right 
+  ACTION: grep -n "class PythonCodePrinter" /testbed/sympy/printing/pycode.py
+  STRATEGY: `sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class — Add the meth
+
+[t0] step 11 (PATCH)
+  THOUGHT: Now I'll look at the area around line 350 to see where to add the method:
+  ACTION: sed -n '340,380p' /testbed/sympy/printing/pycode.py
+  STRATEGY: `sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class — Add the meth
+
+[t0] step 12 (PATCH)
+  THOUGHT: I can see that the `PythonCodePrinter` class starts at line 350 and I need to add the `_print_Indexed` method before the class ends. Let me check if Indexed is imported or if I need to add the import:
+  ACTION: grep -n "Indexed" /testbed/sympy/printing/pycode.py
+  STRATEGY: `sympy/printing/pycode.py` - Add `_print_Indexed` method to `PythonCodePrinter` class — Add the meth
+
+[t0] step 13 (VERIFY)
+  THOUGHT: Let me first create a test script to verify the fix works correctly:
+
+[t0] step 14 (VERIFY)
+  THOUGHT: Let me install the dependencies and test properly:
+
+[t0] step 15 (VERIFY)
+  THOUGHT: Now let me test the fix:
+
+[t0] step 16 (VERIFY)
+  THOUGHT: It seems my fix didn't work as expected. The issue is still showing up. Let me check if my changes were actually applied correctly. Let me look at the actual file content to see if my changes were sav
+
+[t0] step 17 (VERIFY)
+  THOUGHT: My changes weren't saved properly. Let me check the current state of the file and apply the fix correctly:
+
+[t0] step 18 (VERIFY)
+  THOUGHT: Let me look at the exact location where I should add the method:
+
+[t0] step 20 (VERIFY)
+  THOUGHT: Let me add the fix properly by inserting the method in the correct location:
+
+[t0] step 21 (VERIFY)
+  THOUGHT: Let me verify the fix is properly applied and test it:
+
+[t0] step 22 (VERIFY)
+  THOUGHT: I see the issue - I need to fix the indentation. Let me check the exact structure and fix it properly:
+
+[t0] step 23 (VERIFY)
+  THOUGHT: I see there's some corruption in the file. Let me recreate the fix properly by checking the exact structure and adding it correctly:
+
+[t0] step 24 (VERIFY)
+  THOUGHT: Let me directly edit the file properly using a clean approach:
+
+[t0] step 25 (VERIFY)
+  THOUGHT: Let me check the exact structure around the PythonCodePrinter class and add the method properly:
+
+[t0] step 26 (VERIFY)
+  THOUGHT: I can see there's corrupted content. Let me restore from backup and do a proper fix:
+
+[t0] step 27 (VERIFY)
+  THOUGHT: Now let me add the method properly by inserting it in the right location:
+
+[t0] step 28 (VERIFY)
+  THOUGHT: Let me verify the fix is properly applied and test it:
+
+[t0] step 29 (VERIFY)
+  THOUGHT: I see there's a lot of duplication in the file. Let me check the actual structure and make sure I'm editing the right part. Let me look at the beginning of the PythonCodePrinter class:
+
+[t0] step 30 (VERIFY)
+  THOUGHT: I can see that my insertion worked but there's some duplication. Let me clean this up properly by removing the duplicate entries and keeping only one correct entry:
+
+[t0] step 31 (VERIFY)
+  THOUGHT: Let me verify the final structure looks correct:
+
+[t0] step 32 (VERIFY)
+  THOUGHT: There's still some corruption. Let me do a cleaner approach by creating a proper patch and applying it correctly. First, let me create a clean version of the file:
+
+[t0] step 33 (VERIFY)
+  THOUGHT: Now let me add the method properly by finding the exact right spot:
+
+[t0] step 34 (VERIFY)
+  THOUGHT: Let me find the exact line numbers and add the method properly:
+
+[t0] step 35 (VERIFY)
+  THOUGHT: I see there are two `_print_Not` methods. Let me look at the first one to see where to insert:
+
+[t0] step 36 (VERIFY)
+  THOUGHT: Perfect! Now I can see the exact structure. I need to add the `_print_Indexed` method between `_print_sign` and `_print_Not`. Let me do this properly:
+
+[t0] step 37 (VERIFY)
+  THOUGHT: Let me verify the fix is properly applied:
+
+[t0] step 38 (VERIFY)
+  THOUGHT: Great! Now let me test the fix:
+
+[t0] step 39 (VERIFY)
+  THOUGHT: Excellent! The fix is working perfectly. Let me also run the existing tests to make sure I haven't broken anything:
+
+[t0] step 40 (VERIFY)
+  THOUGHT: Let me create a comprehensive test to make sure everything works correctly:
+
+[t0] step 41 (VERIFY)
+  THOUGHT: Perfect! Let me also test the exact case mentioned in the issue description:
+
+[t0] step 42 (VERIFY)
+  THOUGHT: Perfect! The fix is working exactly as required. Let me create the final patch:
+
+[t0] step 43 (VERIFY)
+  THOUGHT: Let me verify the patch content:
+

@@ -221,9 +221,11 @@ class BranchingOrchestrator:
             candidates, history_messages
         )
 
-        # Step 5: Cluster and compute entropy
+        # Step 5: Cluster and compute entropy (context="" — shared-prefix
+        # conditioning saturates DeBERTa entailment; see phased_orchestrator
+        # and scripts/diagnose_context_saturation.py)
         analysis = self.clusterer.analyze(
-            intents, tau=self.tau, context=self.problem_statement[:500]
+            intents, tau=self.tau, context=""
         )
         clusters = analysis["clusters"]
         entropy = analysis["entropy"]
@@ -327,9 +329,11 @@ class BranchingOrchestrator:
         if len(traj_intents) <= 1:
             return
 
-        # Cluster active trajectories by their latest intents
+        # Cluster active trajectories by their latest intents (context="" —
+        # shared-prefix conditioning saturates entailment; see
+        # scripts/diagnose_context_saturation.py)
         intents = [intent for _, intent in traj_intents]
-        clusters = self.clusterer.cluster(intents, context=self.problem_statement[:500])
+        clusters = self.clusterer.cluster(intents, context="")
 
         # For each cluster with >1 trajectory, keep highest-probability and prune rest
         pruned_ids = []
