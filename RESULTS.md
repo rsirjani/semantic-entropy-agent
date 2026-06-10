@@ -634,6 +634,26 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    negative finding about the adaptive gate, not a license to retune τ or the
    entailment threshold post-hoc (any retuned configuration is a new,
    exploratory cell).
+
+   **Protocol deviation — Phase A run-1 archived (2026-06-10), instrument
+   defect.** The first completed Phase A run exhibited the OPPOSITE saturation:
+   8/10 instances merged all five strategies into ONE cluster (entropy 0, gate
+   never fired, k=1), because the clusterer conditioned every entailment pair
+   on a shared `problem_statement[:500]` prefix that saturates DeBERTa
+   entailment regardless of content. Mechanism-level evidence, reproducible
+   from the archived artifacts (`scripts/diagnose_context_saturation.py`):
+   the same five structurally distinct strategies (4 files, distinct
+   mechanisms) score >=0.94 entailment on all 10 pairs WITH the prefix vs
+   <=0.55 WITHOUT. This is an instrument defect (the gate measured the shared
+   prefix, not the strategies), not a tuning choice: τ and the entailment
+   threshold were NOT changed (the no-retune rule above stands), and the
+   deviation was decided while the run-1 primary was null in both directions
+   (gain −0.1, sign-flip p = 1.0, min achievable p = 0.25 — no outcome
+   existed to chase). Run-1 is archived in full
+   (`results/archive_run1_gate_defect/`, also preserved in git history) and
+   reported here; the re-run with the fixed instrument is the confirmatory
+   dataset. The context-conditioning removal is documented at every call site
+   and pinned by `tests/test_clustering_context.py`.
 12. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
    (Fig. 5) shows prompting "give me a different answer" with prior answers in
    context recovers much diversity in open-ended NL. We do not run this arm;
