@@ -377,6 +377,16 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
   batch, matching the eval driver), and the matched-k driver must warn when a
   treatment metadata's per-trajectory entries disagree with its
   `total_trajectories` (old-driver or interrupted artifact).
+  **Draw accounting starts at the fork decision:** a fork that fails at
+  *creation* (container/clone/injection error) is still a genuine draw and
+  must be recorded as a failed empty-patch trajectory — exactly as the
+  resample driver records a crashed resample — never silently skipped; a
+  branch whose injected response *submits* during creation is a completed
+  draw whose patch must be captured, never discarded. Artifacts without
+  batch delimiters (the resample arm's all-trajectories file has no
+  best-of rows to split on) must be made re-run-safe at the **producer** —
+  per-instance row replacement — since no parser-side last-batch rule can
+  isolate a smaller-k re-run there.
 - **R7.3** Figures/tables are regenerable from the predictions artifacts by a
   checked-in script.
 - **R7.4** Determinism knobs (seeds where applicable, model/temperature, package

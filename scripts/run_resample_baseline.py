@@ -99,6 +99,31 @@ def discover_instances_and_k(treatment_dir: str, max_k: int | None) -> dict[str,
     return result
 
 
+def replace_instance_rows(path: str, instance_id: str, new_rows: list[dict]) -> None:
+    """Replace ALL rows for `instance_id` in a JSONL file with `new_rows`.
+
+    R7.2 run-batch hygiene for the resample arm: unlike the branching driver's
+    predictions file, this file has NO batch delimiters (the resample driver
+    writes no best-of "primary" rows), so the parsers' last-batch rule cannot
+    isolate a re-run. With plain append semantics, a re-run at a SMALLER k
+    (e.g. after the treatment was re-run and produced fewer trajectories)
+    would leave the old run's surplus runN rows in the file, and the loaders'
+    keep-last-per-tid would resurrect them into the vanilla arm's metric-time
+    k, rarefaction denominator, and diversity pool. Per-instance replacement
+    (mirroring the primary file's semantics) keeps exactly one batch per
+    instance; other instances' rows are preserved byte-for-byte in order.
+    """
+    rows: list[dict] = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            rows = [json.loads(l) for l in f if l.strip()]
+    rows = [r for r in rows if r.get("instance_id") != instance_id]
+    rows.extend(new_rows)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+
 def run_one_resample(
     instance: dict,
     config: dict,
@@ -203,16 +228,19 @@ def run_temperature(
             run_patches.append(patch)
             print(f"    run{idx}: {len(patch)} chars")
 
-        # All resamples -> diversity / coverage file.
-        with open(all_path, "a", encoding="utf-8") as f:
-            for idx, patch in enumerate(run_patches):
-                f.write(json.dumps({
-                    "instance_id": instance_id,
-                    "model_name_or_path": f"qwen3-coder-resample-t{temperature}-run{idx}",
-                    "model_patch": patch,
-                    "trajectory_id": f"run{idx}",
-                    "temperature": temperature,
-                }) + "\n")
+        # All resamples -> diversity / coverage file. Per-instance REPLACE, not
+        # append: a re-run at smaller k must not leave the old run's surplus
+        # rows behind (see replace_instance_rows).
+        replace_instance_rows(all_path, instance_id, [
+            {
+                "instance_id": instance_id,
+                "model_name_or_path": f"qwen3-coder-resample-t{temperature}-run{idx}",
+                "model_patch": patch,
+                "trajectory_id": f"run{idx}",
+                "temperature": temperature,
+            }
+            for idx, patch in enumerate(run_patches)
+        ])
 
         # Best-of-k -> primary file (vanilla pass@1 reference).
         best = max(run_patches, key=len) if run_patches else ""

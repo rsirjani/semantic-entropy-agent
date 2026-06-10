@@ -158,7 +158,12 @@ def mean_pairwise_distance(patches: Sequence[str]) -> float:
 
     Unlike the distinct count, this needs NO rarefaction correction at unequal
     k: every pair is equally likely to appear in a uniform random k-subset, so
-    the expected subset mean equals the full-sample mean (linearity).
+    the expected subset mean equals the full-sample mean (linearity). Exactness
+    caveat: that identity is exact when all patches are non-empty; with empty
+    patches in the pool the number of non-empty pairs varies per subset and the
+    expected subset MEAN (a ratio of random sums) need not equal the full mean.
+    This metric is a descriptive companion (never a confirmatory endpoint), and
+    the comparison reports each arm's FULL-sample mean, not a subset estimate.
     """
     norms = [n for n in (normalize_patch(p) for p in patches) if n]
     if len(norms) < 2:

@@ -280,6 +280,28 @@ All metrics are pure post-processing over the predictions/eval artifacts
   primary-delimited batch, mirroring the eval driver), and the resample driver
   warns when a treatment `metadata.json`'s patch entries disagree with
   `total_trajectories` (old-driver or interrupted artifact).
+- **Draw accounting starts at the fork decision (iteration-7 extension).** The
+  contract above covered trajectories that *exist* in the run record; the fork
+  paths could still lose draws **at creation**. (i) A strategy or SDLG fork
+  whose container/clone/injection fails is registered as a **failed
+  empty-patch draw** (`phased_orchestrator._register_failed_draw`) — exactly
+  as the resample driver records a crashed resample — instead of being
+  silently skipped, which would deflate the treatment's metric-time k (the
+  same pro-treatment direction as the predictions-record fix, one layer
+  earlier). (ii) An SDLG alternative that **submits during injection** raises
+  `Submitted` inside the clone step; previously the blanket clone-failure
+  handler swallowed it, discarding a completed — possibly passing — child and
+  leaking its container. It is now recorded as a completed, submitted draw
+  with its patch kept (`_inject_alternative`). (iii) The **resample**
+  all-trajectories file has no batch delimiters (no "primary" rows), so the
+  parsers' last-batch rule cannot isolate a re-run there; the driver therefore
+  **replaces the instance's rows on re-run** (`replace_instance_rows`,
+  mirroring its primary file) so a smaller-k re-run cannot leave stale surplus
+  resamples in the vanilla arm's k and diversity pool. All three are
+  stage-tested (`tests/test_end_to_end_mocked.py`), alongside a mocked
+  end-to-end chain test from synthetic trajectories through
+  `collect_patch_entries → build_predictions → eval loaders →
+  compute_metrics.compare`.
 
 - **Coverage — `diverse-pass@k`** via the **unbiased Chen et al. (2021)** estimator on
   *both* arms at matched k. Framed honestly as an **oracle upper bound**, not
@@ -503,7 +525,11 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    the achievable grid), so the τ gate was degenerate there: any τ < ln 5 means
    always-branch, and the entropy signal carries information only if the NLI
    clustering actually merges some intent summaries at the configured
-   entailment threshold (0.5). *Measured, not assumed:* the τ sweep reports
+   entailment threshold (**0.7**, `configs/branching.yaml` — raised pre-pilot
+   from 0.5 to prevent over-merging, which cuts the other way: a higher
+   threshold merges *less*, making all-singleton saturation *more* likely;
+   the no-retune rule below applies to this knob too). *Measured, not
+   assumed:* the τ sweep reports
    every instance's realized partition and the achievable grid, so saturation
    is visible in the artifacts. If the pre-registered runs reproduce it, the
    paper reports the gate as uninformative at this substrate/threshold — a

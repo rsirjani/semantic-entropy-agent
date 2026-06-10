@@ -31,11 +31,17 @@ class Trajectory:
     trajectory_id: str
     """Unique ID, e.g. 't0', 't0_b5_c0' (branched at step 5, cluster 0)."""
 
-    agent: BranchingAgent
-    """The mini-swe-agent DefaultAgent subclass for this trajectory."""
+    agent: BranchingAgent | None = None
+    """The mini-swe-agent DefaultAgent subclass for this trajectory.
 
-    env: DockerEnvironment
-    """The Docker environment for this trajectory."""
+    None ONLY for a failed-at-creation placeholder draw (R7.2 draw accounting):
+    a fork the orchestrator decided to make but whose container/clone/injection
+    failed is still a genuine draw and must appear in the record as a failed
+    empty-patch trajectory, exactly as the resample driver records a crashed
+    resample."""
+
+    env: DockerEnvironment | None = None
+    """The Docker environment for this trajectory (None for placeholders)."""
 
     parent_id: str | None = None
     """ID of the parent trajectory (None for root)."""
@@ -69,8 +75,13 @@ class Trajectory:
     branch_info: dict = field(default_factory=dict)
     """Metadata about the branching event that created this trajectory."""
 
-    def save(self, output_dir: str) -> Path:
-        """Save this trajectory to a file using mini-swe-agent's serialization."""
+    def save(self, output_dir: str) -> Path | None:
+        """Save this trajectory to a file using mini-swe-agent's serialization.
+
+        Placeholder draws (agent=None, failed at creation) have no transcript to
+        save — their draw record lives in metadata.json's patches list."""
+        if self.agent is None:
+            return None
         path = Path(output_dir) / f"trajectory_{self.trajectory_id}.traj.json"
         self.agent.save(
             path,
