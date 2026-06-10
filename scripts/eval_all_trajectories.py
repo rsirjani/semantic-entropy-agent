@@ -76,7 +76,10 @@ def propagate_duplicate_results(
     """
     results = []
     for t in trajectories:
-        tid = t.get("trajectory_id", "primary")
+        # Normalize: a missing or null trajectory_id is the best-of "primary"
+        # duplicate row — name it "primary" so the metric layer's primary-drop
+        # rule sees it (a null id would slip past and inflate n by one).
+        tid = t.get("trajectory_id") or "primary"
         patch = t["model_patch"]
         if not patch:
             results.append({"trajectory_id": tid, "resolved": False,
