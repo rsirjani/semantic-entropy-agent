@@ -382,6 +382,32 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
                              "the patch-production rate."),
                 } if ne_diffs else None)
 
+    # R6.5 — encode the fixed-sequence gatekeeping family IN the artifact, not
+    # only in prose: H2 (coverage) is confirmatory ONLY if H1 (diversity)
+    # rejects at the family-wise alpha. Without this block a reader of the
+    # metrics JSON (the campaign analyst, or whoever fills RESULTS §5) sees
+    # two flat p-values and can mistake an H2 p<0.05 for a confirmatory result
+    # when the gate never opened.
+    if "rarefied_distinct_gain" in result:
+        h1_p = result["rarefied_distinct_gain"]["paired_sign_flip_p"]
+        h1_rejects = h1_p is not None and h1_p < 0.05
+        result["confirmatory_family"] = {
+            "alpha_familywise": 0.05,
+            "H1_diversity": {"endpoint": "rarefied_distinct_gain @k*",
+                             "p": h1_p, "rejects": h1_rejects},
+            "H2_coverage": {"endpoint": "diverse_pass_at_k_gain @k*",
+                            "p": result["paired_sign_flip_p"],
+                            "status": ("confirmatory" if h1_rejects else
+                                       "descriptive (fixed-sequence gate closed: "
+                                       "H1 did not reject)")},
+            "note": ("Fixed-sequence (gatekeeping) family at family-wise "
+                     "alpha=0.05, order fixed by the causal chain (coverage "
+                     "moves only through diversity). Applies as CONFIRMATORY "
+                     "only in the pre-registered cell (strategy-proposal, "
+                     "greedy, tau=0, T=0.7 vs matched-k vanilla); in every "
+                     "other cell read this whole block as descriptive."),
+        }
+
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
     # `thr` is computed ONCE here and reused for the R5.4 low-entropy flag below so
     # the two analyses cannot disagree about which instances are "low entropy".
@@ -574,6 +600,10 @@ def main() -> None:
                 print(f"  [H1 robustness, descriptive] non-empty-only rarefied gain "
                       f"@k*_ne: {ner['mean']}  sign-flip p={ner['paired_sign_flip_p']} "
                       f"(n={ner['n']})")
+            fam = comp.get("confirmatory_family")
+            if fam:
+                print(f"  [family] H1 rejects: {fam['H1_diversity']['rejects']} "
+                      f"-> H2 status: {fam['H2_coverage']['status']}")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]

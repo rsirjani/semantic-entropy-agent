@@ -390,11 +390,149 @@ def test_campaign_stop_file_aborts_before_any_step(monkeypatch, tmp_path):
     assert executed == []
 
 
+def test_analyst_artifact_tamper_stops_campaign(monkeypatch, tmp_path):
+    """The git-porcelain check deliberately skips results/ and
+    campaign_decisions/, but those trees are the DATA PLANE (metrics the next
+    decisions read; the decision-file audit chain). An analyst that modifies
+    any existing artifact there — instead of only writing its own decision
+    file — must stop the campaign loudly (R6.5: adaptivity reads measured
+    data, never alters it)."""
+    monkeypatch.setattr(rc, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(rc, "RESULTS", str(tmp_path / "results"))
+    monkeypatch.setattr(rc, "CAMPAIGN_DIR", str(tmp_path / "results" / "campaign"))
+    monkeypatch.setattr(rc, "DECISIONS_DIR", str(tmp_path / "campaign_decisions"))
+    metrics = tmp_path / "results" / "metrics_strategy_t0.7_vs_vanilla.json"
+    os.makedirs(metrics.parent, exist_ok=True)
+    metrics.write_text('{"comparison": {"diverse_pass_at_k_gain": 0.0}}',
+                       encoding="utf-8")
+    prior = tmp_path / "campaign_decisions" / "decision_01.json"
+    os.makedirs(prior.parent, exist_ok=True)
+    prior.write_text('{"choice": "sdlg_t0.7", "rationale": "prior phase"}',
+                     encoding="utf-8")
+    decision = tmp_path / "campaign_decisions" / "decision_02.json"
+
+    class _P:
+        returncode = 0
+        stdout = ""
+
+    def tampering_analyst(*a, **k):
+        # subprocess.run is also used by _tree_fingerprint (git status) —
+        # tamper ONLY on the analyst invocation, like the real subprocess.
+        if a and a[0] and a[0][0] == "git":
+            return _P()
+        # Writes a valid decision file BUT also rewrites a metrics artifact.
+        decision.write_text(
+            '{"choice": "strategy_t1.0", "rationale": "see the numbers"}',
+            encoding="utf-8")
+        metrics.write_text('{"comparison": {"diverse_pass_at_k_gain": 0.9}}',
+                           encoding="utf-8")
+        return _P()
+
+    monkeypatch.setattr(rc.subprocess, "run", tampering_analyst)
+    monkeypatch.setattr(rc.shutil, "which", lambda name: "claude")
+
+    class _A:
+        analyst_model = "claude-fable-5"
+    choice, why = rc.run_analyst(_state(completed=["strategy_t0.7", "sdlg_t0.7"]),
+                                 2, _A())
+    assert choice is None
+    assert "artifact" in why and "metrics_strategy_t0.7_vs_vanilla.json" in why
+    # Tampering with a PRIOR decision file (the audit chain) is caught too.
+    metrics.write_text('{"comparison": {"diverse_pass_at_k_gain": 0.0}}',
+                       encoding="utf-8")
+
+    def chain_tamperer(*a, **k):
+        if a and a[0] and a[0][0] == "git":
+            return _P()
+        decision.write_text('{"choice": "strategy_t1.0", "rationale": "r"}',
+                            encoding="utf-8")
+        prior.write_text('{"choice": "sdlg_t0.7", "rationale": "REWRITTEN"}',
+                         encoding="utf-8")
+        return _P()
+
+    monkeypatch.setattr(rc.subprocess, "run", chain_tamperer)
+    choice, why = rc.run_analyst(_state(completed=["strategy_t0.7", "sdlg_t0.7"]),
+                                 2, _A())
+    assert choice is None and "decision_01" in why
+
+
+def test_analyst_clean_run_passes_artifact_guard(monkeypatch, tmp_path):
+    """A well-behaved analyst (writes ONLY its decision file) must not trip
+    the artifact guard — including when the campaign's own area
+    (results/campaign/) changes during the window, which is legitimate."""
+    monkeypatch.setattr(rc, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(rc, "RESULTS", str(tmp_path / "results"))
+    monkeypatch.setattr(rc, "CAMPAIGN_DIR", str(tmp_path / "results" / "campaign"))
+    monkeypatch.setattr(rc, "DECISIONS_DIR", str(tmp_path / "campaign_decisions"))
+    metrics = tmp_path / "results" / "metrics_strategy_t0.7_vs_vanilla.json"
+    os.makedirs(metrics.parent, exist_ok=True)
+    metrics.write_text("{}", encoding="utf-8")
+    decision = tmp_path / "campaign_decisions" / "decision_01.json"
+
+    class _P:
+        returncode = 0
+        stdout = ""
+
+    def good_analyst(*a, **k):
+        if a and a[0] and a[0][0] == "git":
+            return _P()
+        os.makedirs(decision.parent, exist_ok=True)
+        decision.write_text('{"choice": "sdlg_t0.7", "rationale": "contrast"}',
+                            encoding="utf-8")
+        # The campaign's own log area changes during the window — legitimate.
+        os.makedirs(rc.CAMPAIGN_DIR, exist_ok=True)
+        with open(os.path.join(rc.CAMPAIGN_DIR, "nli_server.log"), "a",
+                  encoding="utf-8") as f:
+            f.write("tick\n")
+        return _P()
+
+    monkeypatch.setattr(rc.subprocess, "run", good_analyst)
+    monkeypatch.setattr(rc.shutil, "which", lambda name: "claude")
+
+    class _A:
+        analyst_model = "claude-fable-5"
+    choice, why = rc.run_analyst(_state(completed=["strategy_t0.7"]), 1, _A())
+    assert choice == "sdlg_t0.7"
+
+
+def test_campaign_resume_continues_phase_count_and_numbering(monkeypatch, tmp_path):
+    """--max-phases is a GLOBAL budget: a resume with 2 analyst phases already
+    completed gets max_phases-2 more, and decision numbering continues (no
+    collision with the completed phases' decision files)."""
+    _patch_campaign_paths(monkeypatch, tmp_path)
+    os.makedirs(rc.CAMPAIGN_DIR, exist_ok=True)
+    with open(rc.STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"started_ts": time.time(), "started": "x",
+                   "completed_specs": ["strategy_t0.7", "sdlg_t0.7",
+                                       "strategy_t1.0"],
+                   "phase_log": []}, f)
+    executed, analyst_ns = [], []
+    monkeypatch.setattr(rc, "ensure_servers", lambda args: None)
+    monkeypatch.setattr(rc, "run_step",
+                        lambda step, args: executed.append(step["name"]))
+
+    def fake_analyst(state, n, args):
+        analyst_ns.append(n)
+        return ("kernel_t0.7", "ablation") if n == 3 else (None, "stop")
+    monkeypatch.setattr(rc, "run_analyst", fake_analyst)
+    monkeypatch.setattr(sys, "argv",
+                        ["run_campaign.py", "--go", "--resume",
+                         "--max-phases", "4"])
+
+    rc.main()
+
+    # 2 analyst phases were already done (sdlg, t1.0) -> numbering resumes at
+    # 3, and only phases 3 and 4 fit under the global cap of 4.
+    assert analyst_ns == [3, 4]
+    assert any(n.startswith("kernel_t0.7/") for n in executed)
+
+
 def test_stale_decision_file_never_read_as_fresh(monkeypatch, tmp_path):
     """Resume restarts decision numbering at 1; a stale decision_01.json from
     an interrupted campaign must be archived, not validated as if this
     analyst call wrote it (it could re-run a spec nobody just chose)."""
     monkeypatch.setattr(rc, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(rc, "RESULTS", str(tmp_path / "results"))
     monkeypatch.setattr(rc, "DECISIONS_DIR", str(tmp_path / "campaign_decisions"))
     monkeypatch.setattr(rc, "CAMPAIGN_DIR", str(tmp_path / "results" / "campaign"))
     stale = tmp_path / "campaign_decisions" / "decision_01.json"

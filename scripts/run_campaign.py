@@ -32,9 +32,13 @@ with the same treatment->eval->control->eval->metrics pipeline. The analyst writ
 campaign_decisions/decision_<N>.json; invalid or "stop" ends the campaign.
 
 Guardrails: wall-clock cap, disk floor, one-run-per-spec, per-step retry-once,
-a STOP file (campaign_decisions/STOP) aborts between steps. State persists in
-results/campaign/campaign_state.json; --resume continues an interrupted campaign
-(runs use --skip-existing; evals skip instances whose trajectory_eval exists).
+a STOP file (campaign_decisions/STOP) aborts between steps; the analyst window
+is integrity-guarded on BOTH planes (git porcelain for code/config, content
+hashes for results/decision artifacts — adaptivity reads measured data, never
+alters it). State persists in results/campaign/campaign_state.json; --resume
+continues an interrupted campaign (runs use --skip-existing; evals skip
+instances whose trajectory_eval exists; --max-phases counts completed analyst
+phases globally, not per invocation).
 
 Usage:
   python scripts/run_campaign.py                # dry-run: print the plan
@@ -268,7 +272,9 @@ Work in this repository (cwd is the project root). Read, in order:
     interpreting any branching numbers;
  3. the metrics JSONs of every completed phase listed below (read the
     comparison block: H1 rarefied distinct gain + exact sign-flip p +
-    min_achievable_p beside it; H2 gain only if H1 rejected;
+    min_achievable_p beside it; the `confirmatory_family` field states
+    whether the fixed-sequence gate is open — H2 is confirmatory ONLY if
+    H1 rejected, and only in the pre-registered cell;
     nonempty_patch_fraction per arm — a productivity gap can masquerade as a
     diversity gap; k-mismatch report; selected-pass@1 with its
     degenerate-tiebreak count);
@@ -297,6 +303,60 @@ Write EXACTLY one file, `{decision_path}`, valid JSON:
 {{"choice": "<menu key or stop>", "rationale": "<3-8 sentences grounded in the
 numbers you read>", "expectations": "<what result would mean what>"}}
 The LAST thing you do must be writing that file. Make no other changes."""
+
+
+def artifact_fingerprint(skip: set[str] | None = None) -> dict[str, str]:
+    """sha256 of every file under results/ and campaign_decisions/.
+
+    Excludes results/campaign/ (the campaign's OWN mutable area: campaign.log,
+    nli_server.log, state, step logs — legitimately written while an analyst
+    runs) and any absolute paths in `skip` (the decision file the current
+    analyst call is expected to write).
+
+    Why this exists: `unexpected_tree_changes` deliberately ignores results/
+    and campaign_decisions/, because the campaign writes there itself. But
+    those trees hold the DATA PLANE — the metrics/eval/predictions artifacts
+    every later scheduling decision reads and the paper's results are filled
+    from, plus the prior decision files that form the R6.5 audit chain. The
+    analyst runs with permissions skipped, and prompts are not enforcement:
+    an analyst edit to a metrics JSON (or to an earlier decision file) would
+    otherwise pass unnoticed and silently steer every later phase. Hashing
+    before/after the analyst call makes 'adaptivity reads data, never writes
+    it' a checked invariant instead of a hope.
+    """
+    import hashlib
+    skip = {os.path.abspath(p) for p in (skip or set())}
+    campaign_abs = os.path.abspath(CAMPAIGN_DIR)
+    out: dict[str, str] = {}
+    for root in (RESULTS, DECISIONS_DIR):
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if os.path.abspath(os.path.join(dirpath, d)) != campaign_abs]
+            for fn in filenames:
+                fp = os.path.join(dirpath, fn)
+                if os.path.abspath(fp) in skip:
+                    continue
+                h = hashlib.sha256()
+                try:
+                    with open(fp, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            h.update(chunk)
+                except OSError:
+                    continue
+                try:
+                    key = os.path.relpath(fp, PROJECT_ROOT)
+                except ValueError:  # different drive (Windows) — absolute key
+                    key = fp
+                out[key.replace("\\", "/")] = h.hexdigest()
+    return out
+
+
+def changed_artifacts(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """Paths added, removed, or modified between two artifact fingerprints."""
+    return sorted(p for p in set(before) | set(after)
+                  if before.get(p) != after.get(p))
 
 
 def _tree_fingerprint() -> str:
@@ -350,6 +410,10 @@ def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
     cmd = [exe, "-p", "--output-format", "json", "--model", args.analyst_model,
            "--max-turns", "40", "--dangerously-skip-permissions"]
     tree_before = _tree_fingerprint()
+    # Data-plane integrity (R6.5): snapshot AFTER archiving the stale decision
+    # file (so the .superseded copy is part of the baseline) and excluding the
+    # one file this analyst call is supposed to write.
+    artifacts_before = artifact_fingerprint(skip={decision_abs})
     try:
         proc = subprocess.run(
             cmd, cwd=PROJECT_ROOT, capture_output=True, text=True,
@@ -364,6 +428,14 @@ def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
         return None, ("analyst modified the working tree outside "
                       f"campaign_decisions/results ({flagged[:5]}) — stopping; "
                       "inspect `git status` before resuming")
+    tampered = changed_artifacts(artifacts_before,
+                                 artifact_fingerprint(skip={decision_abs}))
+    if tampered:
+        return None, ("analyst modified results/decision artifacts "
+                      f"({tampered[:5]}) — stopping; adaptivity may read "
+                      "measured data, never alter it. Restore the files (they "
+                      "are regenerable from predictions via compute_metrics/"
+                      "budget_audit/tau_sweep) before resuming")
     if not os.path.isfile(decision_abs):
         return None, "analyst wrote no decision file — stopping"
     try:
@@ -603,8 +675,16 @@ def main() -> None:
     else:
         log(f"Phase A ({PHASE_A_KEY}) already complete — continuing to analyst phases")
 
-    # Analyst-driven phases.
-    for n in range(1, args.max_phases + 1):
+    # Analyst-driven phases. The cap counts COMPLETED analyst-chosen specs
+    # across resumes — restarting the counter at 1 on --resume would (a) make
+    # --max-phases a per-invocation budget a resume silently refills, and
+    # (b) collide decision-file numbering with earlier phases' files, breaking
+    # the 1:1 analyst-phase <-> decision_<n>.json mapping the R6.5 audit chain
+    # relies on. An interrupted phase (decision written, spec incomplete)
+    # correctly reuses its n: the stale file is archived and the decision
+    # re-made.
+    n_done = sum(1 for k in state["completed_specs"] if k != PHASE_A_KEY)
+    for n in range(n_done + 1, args.max_phases + 1):
         ok, why = guardrails_ok(state, args)
         if not ok:
             log(f"guardrail stop before analyst phase {n}: {why}")

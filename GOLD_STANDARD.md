@@ -354,7 +354,16 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
   (a repeat draw is variance estimation, never a replacement or pooling
   partner); every scheduling decision is a checked-in artifact with a written
   rationale; and the writeup discloses that the exploratory cell set is
-  data-dependent.
+  data-dependent. **Adaptivity reads measured data, never alters it:** the
+  driver must verify — not assume — that the analyst process modified no
+  existing results or decision artifact (an integrity fingerprint of the data
+  plane taken before and checked after each analyst invocation; any change
+  stops the campaign loudly), since prompts alone are not enforcement and a
+  guard that covers only code/config leaves the very numbers later decisions
+  and the writeup consume unprotected. The fixed-sequence H1→H2 gate must
+  also be encoded in the metrics artifact itself (H2's confirmatory vs
+  descriptive status derived from H1's p in the output), not carried solely
+  in prose a reader can miss.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
   manufacture wins), and per-arm token/compute accounting reported — with any

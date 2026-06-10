@@ -151,7 +151,13 @@ coverage *through* producing distinct solutions, so confirming coverage without
 confirming diversity would be uninterpretable. The hierarchy makes the coverage
 claim *strictly harder* than under a single-endpoint design (it now needs its own
 p < 0.05 **and** H1 upstream), while giving the diversity claim — which §1 says is
-the headline — a confirmatory test it previously lacked.
+the headline — a confirmatory test it previously lacked. The gate is encoded **in
+the artifact itself**, not only in this prose: the metrics JSON's
+`comparison.confirmatory_family` block derives H2's status (confirmatory vs
+descriptive) from H1's exact sign-flip p at α=0.05, so neither the campaign
+analyst nor a reader filling §5 can mistake an H2 p < 0.05 for a confirmatory
+result when H1 did not reject (the block also states it applies as confirmatory
+only in this pre-registered cell).
 
 **Power disclosure (decided before the runs).** The exact sign-flip p-value has a
 hard floor set by ties: with z zero gains among n instances, p ≥ 2^(1+z−n). At
@@ -184,7 +190,12 @@ primary; (ii) adaptivity cannot affect any confirmatory number, only which
 exploratory/descriptive cells exist to report — the set of exploratory cells in
 the paper is therefore data-dependent and is reported as such; (iii) every
 decision is a checked-in artifact (`campaign_decisions/decision_*.json`) with the
-analyst's written rationale, so the selection path is auditable.
+analyst's written rationale, so the selection path is auditable; (iv) the analyst
+window is integrity-guarded on **both planes** — git porcelain for code/config,
+and a content-hash fingerprint of all results/decision artifacts taken before and
+verified after every analyst invocation — so adaptivity can *read* measured data
+and order future cells, but any modification of existing artifacts (metrics,
+predictions, eval records, or prior decision files) stops the campaign loudly.
 
 ### 2.3 Ablations
 

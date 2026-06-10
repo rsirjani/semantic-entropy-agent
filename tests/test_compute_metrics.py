@@ -70,6 +70,34 @@ def test_compare_gain_and_off_mode_recovery(tmp_path):
     assert [o["instance_id"] for o in omr] == ["i1"]
 
 
+def _flat_table(iids, k, n_resolved=0):
+    return {i: {"k": k, "n_resolved": n_resolved} for i in iids}
+
+
+def test_confirmatory_family_gate_open_and_closed():
+    """R6.5 in the artifact: H2's status must be derived from H1's exact
+    sign-flip p, so a flat reading of the metrics JSON cannot mistake a
+    descriptive H2 for a confirmatory one."""
+    iids = [f"i{n}" for n in range(10)]
+    ta, tb = _flat_table(iids, k=3), _flat_table(iids, k=3)
+    # Gate OPEN: treatment all-distinct, vanilla mode-collapsed (3 identical)
+    # on every instance -> rarefied gain +2 x10, exact p = 2/1024 < 0.05.
+    preds_a = {i: ["+a\n", "+b\n", "+c\n"] for i in iids}
+    preds_b = {i: ["+a\n", "+a\n", "+a\n"] for i in iids}
+    comp = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                      preds_a=preds_a, preds_b=preds_b)
+    fam = comp["confirmatory_family"]
+    assert fam["H1_diversity"]["rejects"] is True
+    assert fam["H1_diversity"]["p"] < 0.05
+    assert fam["H2_coverage"]["status"] == "confirmatory"
+    # Gate CLOSED: identical pools -> all H1 gains are exactly 0 -> p=1.0.
+    comp2 = cm.compare(ta, tb, entropy={}, seed=0, split=None,
+                       preds_a=preds_b, preds_b=preds_b)
+    fam2 = comp2["confirmatory_family"]
+    assert fam2["H1_diversity"]["rejects"] is False
+    assert fam2["H2_coverage"]["status"].startswith("descriptive")
+
+
 def test_load_eval_skips_primary_duplicate(tmp_path):
     """The best-of 'primary' row is excluded so matched-k n counts only genuine
     trajectories (consistent with load_predictions)."""
