@@ -433,7 +433,10 @@ def main() -> None:
     p.add_argument("--max-hours", type=float, default=48.0)
     p.add_argument("--min-disk-gb", type=float, default=150.0)
     p.add_argument("--analyst-model", default="claude-fable-5")
-    p.add_argument("--nli-device", default="cuda")
+    # CPU is the known-good NLI device alongside vLLM at 0.85 GPU utilization:
+    # measured 31.9/32.6 GB VRAM used with the model loaded, so deberta-large
+    # + SDLG gradient backprop cannot fit on the GPU concurrently.
+    p.add_argument("--nli-device", default="cpu")
     args = p.parse_args()
 
     state = load_state(args.resume)
