@@ -327,12 +327,14 @@ class SDLGGenerator:
         if not server_candidates:
             return []
 
-        # Step 2: Get importance scores from LLM for the top positions
-        positions = [c["position"] for c in server_candidates[:self.top_k]]
-        tokens_list = [c["token"] for c in server_candidates[:self.top_k]]
-
+        # Step 2: Importance scores from the GENERATOR, per candidate.
+        # Vocabulary unification is TEXT-LEVEL (see _get_importance_scores):
+        # each NLI-vocabulary substitute is scored as p_LLM(v_j | prefix) under
+        # the generator's own tokenization, so I_ij is specific to the
+        # substitute, never a position-level stand-in.
         importance_scores = self._get_importance_scores(
-            target_text, positions, tokens_list, model_name, model_kwargs, messages
+            target_text, server_candidates[:self.top_k], model_name,
+            model_kwargs, messages,
         )
 
         # Step 3: Combine server scores with importance scores
@@ -341,18 +343,12 @@ class SDLGGenerator:
             pos = c["position"]
             A_i = c["attribution"]
             S_ij = c["substitution"]
+            I_ij = importance_scores.get((pos, c.get("replacement_id", 0)), 0.0)
 
-            # Get importance for this position's replacement
-            I_ij = 0.0
-            if pos in importance_scores:
-                # Find matching replacement or use top importance
-                for nli_id, prob in importance_scores[pos]:
-                    if nli_id == c.get("replacement_id", -1):
-                        I_ij = prob
-                        break
-                if I_ij == 0.0 and importance_scores[pos]:
-                    I_ij = importance_scores[pos][0][1]  # Use top importance
-
+            # Documented deviation from Aichberger Alg. 2: scores are combined
+            # by arithmetic mean rather than product. The mean keeps a candidate
+            # rankable on A+S when the generator assigns it negligible mass
+            # (I_ij ~ 0), where a product would zero the whole score.
             combined = (A_i + S_ij + I_ij) / 3.0
 
             all_candidates.append(SubstitutionCandidate(
@@ -369,49 +365,141 @@ class SDLGGenerator:
         all_candidates.sort(key=lambda c: c.combined_score, reverse=True)
         return all_candidates
 
-    def _get_importance_scores(
-        self,
-        code_text: str,
-        word_starts: list[int],
-        tokens: list[str],
-        model_name: str,
-        model_kwargs: dict,
-        messages: list[dict],
-    ) -> dict[int, list[tuple[int, float]]]:
-        """Get LLM token probabilities at word-start positions in the target text.
+    @staticmethod
+    def _normalize_token_text(token: str, keep_case: bool = False) -> str:
+        """Surface form of a tokenizer token (strips Ġ/▁ word-start markers)."""
+        text = token.replace("Ġ", " ").replace("▁", " ").strip()
+        return text if keep_case else text.lower()
 
-        I_ij = p(v_j | y_<i, x, w) — the probability the LLM assigns
-        to alternative token v_j given the context up to position i.
+    @staticmethod
+    def match_substitute_probability(top_logprobs: dict, sub_text: str) -> float | None:
+        """Generator probability of `sub_text` among its own top-k next tokens.
 
-        Uses vLLM's completions endpoint with logprobs to get real LLM
-        probabilities at each position. Works for both thought and code text.
+        Matching is on normalized surface text, so a substitute proposed in the
+        NLI model's vocabulary is scored against the GENERATOR's own token
+        strings — no embedding/vocabulary alignment between the two tokenizers
+        is needed (cf. Aichberger 2025 App. D, which relied on the generator
+        and NLI model sharing a vocabulary). Returns None when the substitute
+        is not among the top-k (caller falls back to exact echo scoring).
+        """
+        import math
 
-        Returns {position: [(nli_token_id, probability), ...]} for top-k alternatives.
+        target = SDLGGenerator._normalize_token_text(sub_text)
+        if not target or not top_logprobs:
+            return None
+        for token_text, logprob in top_logprobs.items():
+            if SDLGGenerator._normalize_token_text(token_text) == target:
+                return math.exp(logprob)
+        return None
+
+    @staticmethod
+    def _echo_score_continuation(
+        base_url: str, model: str, prefix: str, continuation: str
+    ) -> float | None:
+        """Exact p(continuation | prefix) under the generator via prompt logprobs.
+
+        Sends prefix+continuation with echo=true, max_tokens=0 and sums the
+        logprobs of the tokens whose text offsets fall inside the continuation,
+        so the substitute is scored under the generator's own tokenization even
+        when it spans multiple generator tokens. Returns None if the endpoint
+        does not support echo/prompt logprobs or the response is malformed.
         """
         import math
         import requests
 
-        result = {}
+        try:
+            resp = requests.post(
+                f"{base_url}/v1/completions",
+                json={
+                    "model": model,
+                    "prompt": prefix + continuation,
+                    "max_tokens": 0,
+                    "echo": True,
+                    "logprobs": 0,
+                    "temperature": 0,
+                },
+                timeout=10,
+            )
+            lp = resp.json()["choices"][0]["logprobs"]
+            offsets = lp.get("text_offset") or []
+            token_logprobs = lp.get("token_logprobs") or []
+            total, n = 0.0, 0
+            for off, tlp in zip(offsets, token_logprobs):
+                if off >= len(prefix) and tlp is not None:
+                    total += tlp
+                    n += 1
+            return math.exp(total) if n else None
+        except Exception:
+            return None
 
-        nli_tokens = tokens  # DeBERTa tokens
-        text_pieces = []
-        for t in nli_tokens:
-            text_pieces.append(t.replace("Ġ", " ").replace("▁", " "))
+    def _get_importance_scores(
+        self,
+        target_text: str,
+        candidates: list[dict],
+        model_name: str,
+        model_kwargs: dict,
+        messages: list[dict],
+    ) -> dict[tuple[int, int], float]:
+        """I_ij per (position, substitute): the GENERATOR's probability of the
+        specific substitute, I_ij = p_LLM(v_j | y_<i).
+
+        Vocabulary unification: Aichberger 2025 (App. D) relies on the
+        generator and the NLI model sharing a vocabulary; Qwen3's ~151k BPE and
+        DeBERTa's vocabulary do not align, so we bridge at the TEXT level:
+
+          1. ONE top-k logprobs query at the text prefix preceding the original
+             token; each candidate's substitute surface form is matched against
+             the generator's own top-k token strings
+             (match_substitute_probability);
+          2. substitutes outside the top-k get an exact echo-scored query of
+             prefix + substitute (_echo_score_continuation), reading the
+             substitute's prompt logprobs under the generator's tokenization.
+
+        Scoring failures yield 0.0 — negligible generator mass — which
+        correctly down-ranks substitutes the generator would not produce
+        (instead of the previous behaviour of borrowing the position's top
+        alternative probability regardless of the substitute).
+
+        The prefix is located by the original token's surface form in
+        `target_text` (first occurrence), the same convention the generation
+        splice uses (_generate_thought_alternative); the conversation context
+        is not re-encoded — I_ij conditions on the generated text prefix only.
+
+        Returns {(position, replacement_id): probability}.
+        """
+        import requests
 
         api_base = model_kwargs.get("api_base", "http://localhost:8000/v1")
         base_url = api_base.rstrip("/v1").rstrip("/")
+        model = model_name.replace("openai/", "")
 
-        # Use the code text as prompt context for importance scoring
-        for pos in word_starts:
-            prefix = "".join(text_pieces[:pos]).strip()
-            if not prefix:
-                prefix = " "
+        # Group candidates by position; locate each position's text prefix via
+        # the original token's surface form.
+        by_position: dict[int, list[dict]] = {}
+        prefixes: dict[int, str] = {}
+        for c in candidates:
+            pos = c["position"]
+            if pos not in prefixes:
+                orig = self._normalize_token_text(c.get("token", ""), keep_case=True)
+                if not orig:
+                    continue
+                idx = target_text.find(orig)
+                if idx < 0:
+                    idx = target_text.lower().find(orig.lower())
+                    if idx < 0:
+                        continue
+                prefixes[pos] = target_text[:idx].rstrip() or " "
+            by_position.setdefault(pos, []).append(c)
 
+        result: dict[tuple[int, int], float] = {}
+        for pos, cands in by_position.items():
+            prefix = prefixes[pos]
+            top_logprobs: dict = {}
             try:
                 resp = requests.post(
                     f"{base_url}/v1/completions",
                     json={
-                        "model": model_name.replace("openai/", ""),
+                        "model": model,
                         "prompt": prefix,
                         "max_tokens": 1,
                         "logprobs": self.top_k,
@@ -419,21 +507,23 @@ class SDLGGenerator:
                     },
                     timeout=10,
                 )
-                data = resp.json()
-                top_logprobs = data["choices"][0]["logprobs"]["top_logprobs"][0]
-
-                alternatives = []
-                for token_text, logprob in top_logprobs.items():
-                    prob = math.exp(logprob)
-                    clean = token_text.strip()
-                    orig_clean = nli_tokens[pos].replace("Ġ", "").replace("▁", "").strip()
-                    if clean.lower() != orig_clean.lower() and clean:
-                        alternatives.append((hash(clean) % 100000, prob))
-
-                result[pos] = alternatives[:self.top_k]
+                top_logprobs = (
+                    resp.json()["choices"][0]["logprobs"]["top_logprobs"][0] or {}
+                )
             except Exception as e:
-                logger.debug(f"Logprobs failed for pos {pos}: {e}")
-                continue
+                logger.debug(f"SDLG importance: logprobs failed at pos {pos}: {e}")
+
+            for c in cands:
+                sub_text = self._normalize_token_text(
+                    c.get("replacement", ""), keep_case=True
+                )
+                key = (pos, c.get("replacement_id", 0))
+                prob = self.match_substitute_probability(top_logprobs, sub_text)
+                if prob is None and sub_text:
+                    prob = self._echo_score_continuation(
+                        base_url, model, prefix, " " + sub_text
+                    )
+                result[key] = float(prob) if prob is not None else 0.0
 
         return result
 

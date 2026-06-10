@@ -15,7 +15,7 @@ At each agent step:
 
 - **Model**: Qwen3-Coder-30B-A3B, quantized to 4-bit, run locally
 - Full weight access is required for token-level probabilities and gradient-based attribution
-- **Evaluation**: 10 instances from SWE-bench Verified, drawn from SymPy (see Appendix C of proposal for instance list)
+- **Evaluation**: 10 instances from SWE-bench Verified, drawn from SymPy. NOTE: this is a **documented deviation** from the proposal's Appendix C list (see "SWE-bench Instances" section below)
 - **Metrics**: pass@1 (baseline) vs diverse-pass@1 (whether any branched trajectory passes)
 
 ## System Details
@@ -82,7 +82,11 @@ These are the papers whose methods we directly implement or build upon:
 
 - **PDFs/Farquhar_2024_Semantic_Entropy.pdf** — Kuhn, Gal & Farquhar, 2023. "Semantic Uncertainty: Linguistic Invariances for Uncertainty Estimation in Natural Language Generation" (ICLR 2023, arXiv:2302.09664). **Companion paper** — the earlier conference version with more pedagogical detail in the main text. Algorithm 1 here is the same bidirectional entailment clustering pseudocode. Useful for understanding the method derivation.
 
-- **PDFs/Yao_2023_ReAct.pdf** — Yao et al., 2023b. "ReAct: Synergizing reasoning and acting in language models" (ICLR 2023). The agent loop paradigm we follow — each response may contain reasoning traces, actions (bash commands), or both.
+- **PDFs/Yao_2023_ReAct.pdf** — Yao et al., 2023b. "ReAct: Synergizing reasoning and acting in language models" (ICLR 2023). The agent loop paradigm we follow — each response may contain reasoning traces, actions (bash commands), or both. §3.3 fn. 4 names greedy-decoding repetition loops as an open problem — the cleanest "gap left open" citation for our method.
+
+- **PDFs/Nikitin_2024_KLE.pdf** — Nikitin et al., 2024. "Kernel Language Entropy: Fine-grained Uncertainty Quantification for LLMs from Semantic Similarities" (arXiv:2405.20003). Source of the `kernel` clustering-ablation variant (von Neumann entropy of the graph heat kernel exp(-tL)) implemented in `src/diversity/clustering.py`.
+
+- **PDFs/DeBERTa_2021.pdf** — He, Liu, Gao & Chen, 2021. "DeBERTa: Decoding-enhanced BERT with Disentangled Attention" (ICLR 2021). Architecture paper for the NLI backbone (deberta-large-mnli, 91.1 MNLI-m). Cite only for "strong MNLI classifier" — it makes no claims about semantic-equivalence clustering, code text, or gradient attribution.
 
 ### Evaluation Framework References
 
@@ -102,13 +106,27 @@ These are the papers whose methods we directly implement or build upon:
 
 ### Diversity & Knowledge Collapse References
 
-- **PDFs/Wright_2025_Epistemic_Diversity_Knowledge_Collapse.pdf** — Wright et al., 2025. "Epistemic diversity and knowledge collapse in large language models" (arXiv:2510.04226). Documents knowledge collapse in LLMs — motivates our work.
+- **PDFs/Wright_2025_Epistemic_Diversity_Knowledge_Collapse.pdf** — Wright et al., 2025. "Epistemic diversity and knowledge collapse in large language models" (arXiv:2510.04226). CITATION CAUTION: documents *low/concentrated* diversity (LLMs less diverse than web search; larger models less diverse; Qwen family stagnant), but its own conclusion is that models are NOT locked into narrow frames and diversity is improving — cite for "concentrated diversity," not "knowledge collapse is happening." Tests only instruction-tuned models (no base-model arm), so it cannot support the RLHF-sharpening claim. Independently validates our clustering stack (same DeBERTa-MNLI bidirectional entailment + entropy, §4.2).
 
-- **PDFs/Wright_2024_LLM_Tropes.pdf** — Wright et al., 2024. "LLM tropes: Revealing fine-grained values and opinions in large language models" (EMNLP 2024). Documents recurring patterns in LLM outputs.
+- **PDFs/Wright_2024_LLM_Tropes.pdf** — Wright et al., 2024. "LLM tropes: Revealing fine-grained values and opinions in large language models" (EMNLP 2024). Recurrent justification "tropes" survive 420 prompt variations — closest evidence that *reasoning-trace* distributions are mode-concentrated (relevant to SDLG perturbing reasoning).
 
-- **PDFs/Zhang_2025_NoveltyBench.pdf** — Zhang et al., 2025. "NoveltyBench: Evaluating language models for human-like diversity" (COLM 2025). Shows models generate less variety than human writers.
+- **PDFs/Zhang_2025_NoveltyBench.pdf** — Zhang et al., 2025. "NoveltyBench: Evaluating language models for human-like diversity" (COLM 2025). **Load-bearing mode-collapse citation**: <3 functionally distinct outputs per 10 samples at temperature 1.0 (their "best-case" setting), and the OLMo-2 staged analysis (§4.4) shows each alignment stage (SFT→DPO→RLVR) reduces diversity, biggest drop at DPO. Caveats: prompts explicitly exclude code; their Fig. 5 shows in-context "give me a different answer" regeneration recovers much diversity — a cheap rival baseline to pre-empt.
 
-- **PDFs/Moore_2024_LLM_Consistency_Values.pdf** — Moore et al., 2024. "Are large language models consistent over value-laden questions?" (EMNLP 2024). Related work on value consistency and output homogeneity.
+- **PDFs/Moore_2024_LLM_Consistency_Values.pdf** — Moore et al., 2024. "Are large language models consistent over value-laden questions?" (EMNLP 2024). CITATION CAUTION: do NOT cite for RLHF sharpening/mode collapse — its protocol is temp-0, single-sample, paraphrase-consistency (a different construct), and its headline result (base models MORE consistent than aligned ones) superficially points the opposite way. Cite only as related work on aligned-vs-base behavioral differences.
+
+### Uncertainty-Quantification Theory (lineage & blind-spot framing)
+
+- **PDFs/2311.08309v1.pdf** — Schweighofer*, Aichberger*, Ielanskyi & Hochreiter, 2023. "Introducing an Improved Information-Theoretic Measure of Predictive Uncertainty" (M3L Workshop @ NeurIPS 2023). Same JKU Linz group as SDLG — the theoretical predecessor (AU/EU decomposition via expected pairwise KL) motivating SDLG's uncertainty framing. Grounds why semantic entropy is a total-uncertainty proxy, not an epistemic measure (feeds the §0.1 "entropy blind spot").
+
+- **PDFs/2511.04418v2.pdf** — Tomov, Fuchsgruber, Wollschläger & Günnemann (TU Munich), 2026 preprint. "The Illusion of Certainty: Uncertainty Quantification for LLMs Fails under Ambiguity." Proves consistency-based UQ (semantic entropy included) tracks epistemic error only when aleatoric uncertainty is zero; uses our exact clustering stack. KEY DEFENSIVE CITATION: entropy is a *multiplicity* signal, so the right response to high entropy is branching (exploration), not abstention.
+
+- **PDFs/2604.17112v1.pdf** — Hamidieh et al. (MIT), ICLR 2026. "Complementing Self-Consistency with Cross-Model Disagreement for Uncertainty Quantification." Documents the confident-error failure of self-consistency (models collapse onto one wrong answer — the QA-domain twin of our mode-collapse premise); KLE appears as a baseline. Supports motivation; no agents/code/branching.
+
+- **PDFs/1811.07253v1.pdf** — Xiao & Wang, AAAI 2019. "Quantifying Uncertainties in Natural Language Processing Tasks." Pre-LLM historical ancestor of the aleatoric/epistemic vocabulary in NLP. Optional background only.
+
+### Closest Concurrent Work (must-cite, must-differentiate)
+
+- **PDFs/2603.27098v1.pdf** — Wei et al., 2026 preprint (arXiv Mar 2026). "Predicting Program Correctness By Ensemble Semantic Entropy." Closest competitor on keywords: semantic entropy + threshold gate + Qwen3-Coder-30B + code. Crucially different: single-turn LiveCodeBench (no agent loop), entropy gates a *cascade to a bigger model* (not branching into diverse trajectories), no diverse-generation mechanism, execution-based (not NLI) clustering. Its motivating observation — single-model resampling converges to confidently-wrong clusters on code — independently corroborates our premise. Also finds NLI clustering weak on *raw code text*, which supports our choice to cluster intent summaries instead.
 
 ### Additional Reference (NOT in proposal)
 
@@ -130,7 +148,18 @@ These are the papers whose methods we directly implement or build upon:
 6. **Branching**: If entropy > τ, each cluster spawns an independent trajectory with its own conversation history
 7. **Evaluation**: Run each completed trajectory's patch against SWE-bench unit tests
 
-## SWE-bench Instances (from proposal Appendix C)
+## SWE-bench Instances (DEVIATION from proposal Appendix C)
+
+The proposal's Appendix C committed to a **difficulty-spanning** set (sympy-12481
+plus 13974, 13877, 14248, 13852, 12489, 18199, 17630, 16597, 13878, rated <15 min
+up to >4 hr) to test whether branching helps more on harder problems. The set
+actually used (below) is **all-easy (<15 min)** and shares only sympy-12481 with
+the proposal. Rationale: pilot runs showed the local 4-bit 30B model has a ~0%
+base resolve rate on the 1 hr+ instances, so the harder band yields no
+treatment-vs-control contrast at our compute budget; the easy band gives nonzero
+base rates where a coverage difference is measurable. This deviation MUST be
+disclosed in the final report (see RESULTS.md §6 threats-to-validity), and all
+claims are scoped to the easy band accordingly.
 
 | Instance ID | Est. Difficulty |
 |---|---|

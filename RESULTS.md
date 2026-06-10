@@ -12,13 +12,18 @@
 ## 1. The claim (conceptual spine — §0.1 of `GOLD_STANDARD.md`)
 
 **Headline (a diversity claim, not a leaderboard claim).** At a *matched trajectory
-budget and matched sampling temperature*, vanilla LLM resampling mode-collapses to a
-few semantic forms, whereas semantic-entropy-gated branching explores meaningfully
-distinct solutions and is therefore more likely to contain a passing fix. The
-contribution is the **semantic-entropy-gated branching core**; the candidate
-generator (strategy-proposal vs SDLG) is a pluggable, ablated input. **A rigorous
-null/negative result is publishable** — if branching does not beat matched-k vanilla,
-we report that with the same statistical care.
+budget and matched sampling temperature*, vanilla LLM resampling **concentrates on a
+few semantic forms with diminishing returns** — not zero diversity (EntroPO's
+baselines still improve with rollout count; SWE-agent App. B.5 shows pure resampling
+pass@6 nearly doubles pass@1 on Lite, which is exactly why the matched-k control is
+necessary) — whereas semantic-entropy-gated branching explores meaningfully distinct
+solutions and is therefore more likely to contain a passing fix. The diverse-pass@k
+number is reported as an **oracle/coverage row** (mirroring Tree of Thoughts' "+best
+state" convention), never as deployable accuracy. The contribution is the
+**semantic-entropy-gated branching core**; the candidate generator (strategy-proposal
+vs SDLG) is a pluggable, ablated input. **A rigorous null/negative result is
+publishable** — if branching does not beat matched-k vanilla, we report that with the
+same statistical care.
 
 **Why diversity helps — the unifying principle.** Greedy / low-temperature decoding
 returns the *mode* of the model's solution distribution; diversity is valuable
@@ -35,9 +40,19 @@ arises for several distinct reasons, treated as a holistic family:
 3. **Distributional / mode-collapse bias — even when the answer is a single point.**
    Pretraining frequency bias and RLHF sharpening concentrate sampling on a few
    "typical"/safe modes; a *better, correct* trajectory can sit in the model's support
-   but in a low-probability region it rarely samples (knowledge collapse — Wright 2025;
-   reduced variety — NoveltyBench, Zhang 2025). Diversity deliberately explores *off
-   the dominant mode* to reach it.
+   but in a low-probability region it rarely samples. Diversity deliberately explores
+   *off the dominant mode* to reach it. **Load-bearing citations:** NoveltyBench
+   (Zhang et al. 2025 — <3 functionally distinct outputs per 10 samples at temperature
+   1.0, their "best-case" setting; and the OLMo-2 staged analysis showing each
+   alignment stage SFT→DPO→RLVR reduces diversity, biggest drop at DPO) and EntroPO
+   (Prop. 3.4 — standard DPO preserves the reference policy's likelihood ratios,
+   perpetuating "rare correct trajectories"; their less-diverse policies scale worse
+   with rollout count on SWE-bench with our exact model). Wright et al. 2025 is cited
+   for *concentrated* diversity (LLMs less diverse than web search; Qwen family
+   stagnant) — NOT for "knowledge collapse is happening": their own conclusion is that
+   models are not locked into narrow frames. Moore et al. 2024 is NOT cited for this
+   mechanism (its temp-0 paraphrase-consistency protocol measures a different
+   construct and superficially points the other way).
 4. **Multi-step compounding.** An early agent commitment determines which region of
    solution space is even reachable; a single trajectory locks in and cannot recover.
    Trajectory-level diversity hedges against early lock-in — distinct from token-level.
@@ -50,10 +65,17 @@ entropy signals a *spread* distribution (cases 1–2), so the adaptive gate (bra
 entropy `> τ`) spends diversity where the distribution is visibly multi-modal and
 saves it where the mode is already decisive. But entropy measures *spread, not
 correctness*: under case 3, mode collapse can make the model **confidently wrong** —
-low entropy over a biased mode — which the entropy gate will **not** flag. That is why
-the paper carries mechanisms that do **not** depend on the model's own confidence:
-SDLG forces off-mode exploration by construction, and cross-model diversity (§9)
-escapes a single model's bias. The arms are therefore *complementary, not redundant*.
+low entropy over a biased mode — which the entropy gate will **not** flag. This blind
+spot is **documented in print**: Farquhar et al. 2024 (Nature, p. 629) explicitly
+scope semantic entropy away from "situations in which LLMs are confidently wrong,"
+and Tomov et al. 2026 (`PDFs/2511.04418v2.pdf`) prove consistency-based UQ tracks
+epistemic error only when aleatoric uncertainty is zero. The same theory supplies our
+defense: entropy is a *multiplicity* signal, so the correct response to high entropy
+is **branching (exploration), not abstention** — and the τ-gate is claimed only for
+the multiplicity/residual-uncertainty mechanisms (cases 1–2). That is why the paper
+carries mechanisms that do **not** depend on the model's own confidence: SDLG forces
+off-mode exploration by construction, and cross-model diversity (§9) escapes a single
+model's bias. The arms are therefore *complementary, not redundant*.
 
 **Falsifiable predictions (tested by §4, not assumed):**
 - Branching's benefit over matched-k vanilla is **largest where the correct solution
@@ -101,6 +123,38 @@ writes a **separate results dir** so no run overwrites another's predictions.
   — `strategy_proposal` collapses to the single dominant cluster when `entropy ≤ τ`,
   mirroring the SDLG arm's early return (see `_propose_strategies`,
   `phased_orchestrator.py`).
+
+### 2.4 Documented deviations from the reference methods (R1.1)
+
+These are deliberate, disclosed deviations — not bugs:
+
+1. **SDLG vocabulary bridge (Aichberger 2025 App. D).** The paper's setup relied on
+   the generator (OPT) and the NLI model (DeBERTa) sharing a vocabulary; Qwen3's
+   ~151k BPE and DeBERTa's vocabulary do not align. We unify at the **text level**:
+   (i) substitution candidates are proposed and scored (attribution `A_i`,
+   substitution `S_ij`) in DeBERTa's embedding space server-side; (ii) the importance
+   term `I_ij = p_LLM(v_j | y_<i)` is computed under the **generator's own
+   tokenization** by converting each substitute to its surface string and matching it
+   against the generator's top-k next-token strings, with an exact echo-scored
+   prompt-logprob query for substitutes outside the top-k
+   (`src/diversity/sdlg.py::_get_importance_scores`, unit-tested in
+   `tests/test_sdlg_importance.py`); (iii) the chosen substitute is spliced into the
+   reasoning text as a string (first occurrence of the original token's surface form)
+   and the generator re-tokenizes and completes from the splice point. No bilingual
+   embedding mapping is used.
+2. **Score combination.** Candidates are ranked by the arithmetic mean
+   `(A_i + S_ij + I_ij)/3` rather than the paper's product form: the mean keeps a
+   candidate rankable on attribution+substitution when the generator assigns it
+   negligible mass, where a product would zero the score.
+3. **Importance conditioning.** `I_ij` conditions on the generated text prefix only
+   (not the full re-encoded conversation context) — matching the splice used at
+   generation time.
+4. **SDLG trigger scope.** The proposal (p. 2) applies diverse generation "at each
+   agent step"; for compute reasons SDLG fires at the **first write command** (the
+   first state-changing action, `phases.is_write_command`), where the trajectory
+   first commits to an implementation. Branching frequency is therefore a per-run
+   statistic, not per-step.
+5. **Instance set.** Deviates from proposal Appendix C — see §6, threat 8.
 
 ---
 
@@ -223,6 +277,29 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    or under-count behaviorally-equivalent patches. *Acknowledged:* it is deliberately
    **not** the branching NLI (avoids circularity, R4.2); a behavioral-diversity check is
    a roadmap item.
+8. **Instance-set deviation from the proposal (disclosure).** Proposal Appendix C
+   committed to a *difficulty-spanning* SymPy set (sympy-12481 plus nine instances
+   rated <15 min up to >4 hr) to test whether branching helps more on harder
+   problems. The set actually run is **all-easy (<15 min)** and shares only
+   sympy-12481 with Appendix C. *Justification:* pilot runs showed the local 4-bit
+   30B model has a ~0% base resolve rate on the 1 hr+ band, yielding no
+   treatment-vs-control contrast at our compute budget; the easy band gives nonzero
+   base rates where a coverage difference is measurable. *Consequence:* the
+   proposal's "helps more on harder problems" hypothesis is **untested** and is
+   replaced by the entropy-stratification analysis (§4) within the easy band; all
+   claims are scoped accordingly (threat 1).
+9. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
+   (Fig. 5) shows prompting "give me a different answer" with prior answers in
+   context recovers much diversity in open-ended NL. We do not run this arm;
+   defenses: our setting is multi-turn and action-constrained, the strategy-proposal
+   arm *is* a structured version of this idea inside the agent loop, and EntroPO
+   (Fig. 4) shows unprincipled sampling randomness degrades SWE precision past
+   T≈0.9. (b) *Sequential revision:* Snell et al. show sequential self-revision can
+   beat parallel sampling at matched budget on MATH; we do not run a revision arm
+   because their revision model required fine-tuning ("simply prompting existing
+   LLMs to correct their own mistakes tends to be largely ineffective"), which is
+   out of scope for an inference-time method. Both are stated as future-work arms,
+   not silently omitted.
 
 ---
 

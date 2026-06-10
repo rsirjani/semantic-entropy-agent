@@ -19,12 +19,26 @@ git branch (review-loop/<timestamp>) with a commit per iteration, so every step 
 revertible. Full multi-hour GPU/SWE-bench runs are forbidden to the agent unless
 --allow-experiments is given; otherwise it verifies wiring via smoke checks only.
 
+Two charters (--charter):
+  rubric   — the original mode: audit against GOLD_STANDARD.md, fix gaps, verdict.
+  scrutiny — first-principles design review: re-derive the math, stress the
+             philosophy/framing, steelman alternatives to every experimental
+             choice, and refine the experiments BEFORE the GPU runs make design
+             changes expensive. Value-level design changes still go through the
+             spec ratchet (quarantined proposals); findings land in
+             review_loop/scrutiny_<NN>.md. The loop stops when two consecutive
+             iterations find no further substantive design flaw.
+
 Examples:
   # See exactly what it would do, change nothing:
   python scripts/review_improve_loop.py
 
-  # Run for real (isolated branch, opus, 12 iterations, $20 cap):
-  python scripts/review_improve_loop.py --go --model opus --max-iterations 12 --max-cost-usd 20
+  # Original rubric loop (isolated branch, 12 iterations, $20 cap):
+  python scripts/review_improve_loop.py --go --charter rubric --max-iterations 12 --max-cost-usd 20
+
+  # First-principles scrutiny loop on Fable (resume numbering after iter 0-2):
+  python scripts/review_improve_loop.py --go --charter scrutiny --model claude-fable-5 \
+      --start-iteration 3 --max-iterations 6 --max-cost-usd 25
 """
 
 import argparse
@@ -121,6 +135,89 @@ a self-serving change is simply undone. Don't waste effort trying to sneak one p
 CRITICAL: the LAST thing you do must be writing `{verdict_path_rel}` as valid JSON.
 The wrapper reads only that file to decide whether to loop again. If you cannot
 complete all fixes, still write the verdict reflecting current state.
+"""
+
+
+def compose_scrutiny_prompt(iteration: int, verdict_path_rel: str,
+                            allow_experiments: bool) -> str:
+    experiments_clause = (
+        "You MAY launch longer experiment runs if genuinely necessary."
+        if allow_experiments else
+        "You MUST NOT launch the multi-hour GPU / vLLM / full-SWE-bench runs; verify "
+        "wiring and correctness via the mocked stage tests and driver smoke checks only."
+    )
+    return f"""\
+You are the principal scientist doing a FIRST-PRINCIPLES design review of this PhD
+research project, iteration {iteration} of a scrutiny loop. Work entirely within
+this repository (cwd is the project root). The headline GPU experiments have NOT
+been run yet — this is the last cheap moment to change the design. Your job is not
+rubric compliance (a prior loop did that); it is to make these the best, most
+truthful experiments this project can run, and to make sure everything makes sense.
+
+ORIENT FIRST: read GOLD_STANDARD.md (the rubric + §0.1 framing), CLAUDE.md,
+RESULTS.md (esp. §2.4 documented deviations and §6 threats), the prior verdicts and
+any scrutiny_*.md in review_loop/, and the papers in PDFs/ as needed (use the
+file-system-windows-python read-file MCP tool). Then do the following, in order:
+
+1. ARTICULATE THE BIG PICTURE (write it down before judging anything). What is the
+   end goal — what exact scientific claim should the final paper defend, what would
+   the ideal evidence for it look like, and what is the minimal sufficient
+   experiment set? State the claim in one falsifiable sentence. If the repo's
+   current design serves a different (weaker, vaguer, or merely easier) claim than
+   the one worth defending, say so explicitly.
+
+2. SCRUTINIZE through three lenses, in writing, with evidence pointers:
+   - TRUTHFULLY: does every claim in the docs/framing correspond to what the
+     artifacts and design can actually show? Hunt overclaims, silent assumptions,
+     and confounds (budget asymmetries, selection effects, eval gaps, circularity).
+   - MATHEMATICALLY: re-derive, do not trust. The pass@k estimator and its use at
+     matched k; the discrete-entropy estimator at small N (quantization, bias); the
+     bootstrap's validity at n=10 instances; the KLE heat-kernel limits; whether
+     trajectory-count matching is the right budget match given branched
+     trajectories share a SEARCH prefix while vanilla resamples pay full cost
+     (trajectory-matched vs token-matched — which comparison is fair, and for
+     which claim?); statistical power and multiple-comparison exposure across the
+     temperature sweep and ablations.
+   - PHILOSOPHICALLY: is the §0.1 mode/diversity framing coherent and
+     non-circular? Is "diversity" defined independently of the mechanism that
+     produces it? Are the falsifiable predictions actually falsifiable at this n?
+     What is the weakest joint a hostile reviewer would press, and does the design
+     answer it or merely acknowledge it?
+
+3. STEELMAN ALTERNATIVES: for each major design choice (clustering substrate =
+   intent summaries; gate signal = discrete semantic entropy; matched-k definition;
+   τ default; the two diversity arms; the independent diversity metric; the
+   instance set), name the strongest alternative, and either justify the current
+   choice against it or propose the change. Known open questions you should weigh
+   (do NOT limit yourself to these): per-instance k-match is enforced at run time
+   but not at metric time; τ=0 default means the headline config never exercises
+   the gate the title claims; selected-pass@1 has no selector implementation;
+   entropy from ~5 candidates takes few distinct values, so τ is effectively a
+   cluster-count rule — say so plainly if true.
+
+4. ACT on what you find, this iteration: implement in-scope improvements (code,
+   tests, analysis scripts, docs) with real edits, verified (py_compile, pytest).
+   {experiments_clause} Write the full scrutiny record — big picture, findings,
+   decisions, rejected alternatives WITH reasons — to
+   `review_loop/scrutiny_{iteration:02d}.md`. Design changes that rest on value
+   judgments or would alter what the rubric demands go through the spec ratchet:
+   write them as quarantined proposals in `review_loop/spec_amendments/` for human
+   ratification, do NOT edit GOLD_STANDARD.md for them (derivable rigor-INCREASING
+   corrections may be applied directly, per the spec's ratchet rule — an
+   independent critic reviews and reverts anything else).
+
+5. WRITE THE VERDICT `{verdict_path_rel}` as JSON exactly matching the schema at
+   the bottom of GOLD_STANDARD.md, iteration {iteration}. In this charter,
+   `gold_standard_met` means: every BLOCKER still passes AND this iteration found
+   NO further substantive design flaw or unresolved scrutiny question (minor
+   style/wording nits do not count). If you found and fixed real issues, set it
+   false so the loop runs again; the loop should only go quiet when the design has
+   nothing left to confess. Put anything requiring a human (GPU runs, value-level
+   ratifications) in `next_actions`. A rigorous null result is as good as a
+   positive one — do not bend the design toward producing a win.
+
+CRITICAL: the LAST thing you do must be writing `{verdict_path_rel}` as valid JSON.
+The wrapper reads only that file to decide whether to loop again.
 """
 
 
@@ -348,7 +445,13 @@ def main() -> None:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--go", action="store_true",
                    help="Actually invoke claude (default is dry-run: print only).")
-    p.add_argument("--model", default="opus", help="Model alias/id (default: opus).")
+    p.add_argument("--model", default="claude-fable-5",
+                   help="Model alias/id (default: claude-fable-5; 'opus'/'sonnet' aliases also work).")
+    p.add_argument("--charter", default="rubric", choices=["rubric", "scrutiny"],
+                   help="rubric = audit/fix against GOLD_STANDARD.md (original mode); "
+                        "scrutiny = first-principles design review that re-derives the "
+                        "math, stresses the framing, and refines the experiments before "
+                        "the GPU runs (default: rubric).")
     p.add_argument("--max-iterations", type=int, default=12)
     p.add_argument("--max-turns", type=int, default=250,
                    help="Per-iteration agent turn cap. One thorough pass (read rubric + "
@@ -383,8 +486,9 @@ def main() -> None:
     print(f"Rubric:  {SPEC_PATH}")
     print(f"claude:  {exe}")
     print(f"Mode:    {'LIVE (--go)' if args.go else 'DRY-RUN (no claude invocation; pass --go to run)'}")
-    print(f"Model={args.model}  max_iters={args.max_iterations}  max_turns={args.max_turns}  "
-          f"perm={args.permission_mode}  experiments={args.allow_experiments}")
+    print(f"Model={args.model}  charter={args.charter}  max_iters={args.max_iterations}  "
+          f"max_turns={args.max_turns}  perm={args.permission_mode}  "
+          f"experiments={args.allow_experiments}")
 
     branch = git_start_branch(args.no_git) if args.go else None
 
@@ -394,7 +498,9 @@ def main() -> None:
 
     for i in range(args.start_iteration, args.start_iteration + args.max_iterations):
         vpath_rel = os.path.relpath(verdict_path(i), PROJECT_ROOT).replace("\\", "/")
-        prompt = compose_prompt(i, vpath_rel, args.allow_experiments)
+        composer = (compose_scrutiny_prompt if args.charter == "scrutiny"
+                    else compose_prompt)
+        prompt = composer(i, vpath_rel, args.allow_experiments)
         print(f"\n{'='*72}\n  ITERATION {i}\n{'='*72}")
 
         if not args.go:
