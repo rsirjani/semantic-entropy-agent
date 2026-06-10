@@ -117,7 +117,17 @@ def vanilla_samples_at_temperature(model_config: dict, branching_config: dict) -
 
 
 def build_env_config(config: dict, instance_id: str) -> dict:
-    """Build DockerEnvironment config for a specific instance."""
+    """Build DockerEnvironment config for a specific instance.
+
+    Anti-gaming hard guarantee: agent containers run with `--network none`.
+    Measured 2026-06-10: the sweb eval images have OPEN internet under default
+    docker networking (`pip download six` succeeded inside the image), so an
+    agent could in principle fetch the upstream fix (PR/issue) for its
+    instance. Container-level isolation closes that vector regardless of what
+    command-level vetoes miss (e.g. python-level sockets). The eval images are
+    self-contained (deps preinstalled), so nothing legitimate needs the
+    network mid-run.
+    """
     env_config = dict(config.get("environment", {}))
     env_config["image"] = find_eval_image(instance_id)
     # Convert interpreter list from YAML
@@ -125,6 +135,10 @@ def build_env_config(config: dict, instance_id: str) -> dict:
         pass  # Already a list, good
     # Remove environment_class key (not part of DockerEnvironmentConfig)
     env_config.pop("environment_class", None)
+    run_args = list(env_config.get("run_args", []))
+    if "--network" not in run_args:
+        run_args += ["--network", "none"]
+    env_config["run_args"] = run_args
     return env_config
 
 

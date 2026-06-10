@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-18763",
+  "elapsed_seconds": 712.4409096240997,
+  "total_steps": 771,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 3,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "Fix implemented: Modified _print_Subs method in sympy/printing/latex.py to properly parenthesize binary operations (Add, Mul, Pow) in Subs expressions.\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 39,
+      "parent_id": null,
+      "strategy": "`sympy/printing/latex.py` - Modify the `_print_Subs` method in the `LatexPrinter` class to wrap the expression in parentheses when it's a binary operation ```python # In sympy/printing/latex.py, around line 1500-1510 def _print_Subs(self, expr): # ... existing code ... if isinstance(expr.expr, (Add, Mul, Pow)): expr_str = r\"\\left(%s\\right)\" % self._print(expr.expr) else: expr_str = self._print(expr.expr) # ... rest of existing code ... ```",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "",
+      "submitted": false,
+      "status": "completed",
+      "steps": 301,
+      "parent_id": "t0",
+      "strategy": "`sympy/core/expr.py` - Override the `__repr__` or `__str__` method in the `Subs` class to enforce proper grouping ```python # In sympy/core/expr.py, modify the Subs class definition class Subs(Expr): # ... existing code ... def __str__(self): # Add parentheses around the expression when needed expr_str = str(self.expr) if isinstance(self.expr, (Add, Mul, Pow)): return f\"Subs(({expr_str}), {self.variables}, {self.point})\" return f\"Subs({expr_str}, {self.variables}, {self.point})\" ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/core/expr.py` - Override the `__repr__` or `__str__` method in the `Subs` class to enforce proper grouping ```python # In sympy/core/expr.py, modify the Subs class definition class Subs(Expr): "
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py\nindex 8743723ea0..9b6ae0f6f5 100644\n--- a/sympy/printing/latex.py\n+++ b/sympy/printing/latex.py\n@@ -695,15 +695,28 @@ def _print_Derivative(self, expr):\n         return r\"%s %s\" % (tex, self.parenthesize(expr.expr,\n                                                   PRECEDENCE[\"Mul\"],\n                                                   strict=True))\n \n+    def _needs_parentheses(self, expr):\n+        from sympy.core import Add, Mul, Pow\n+        from sympy.core.symbol import Symbol\n+        from sympy.core.numbers import Number\n+        return isinstance(expr, (Add, Mul, Pow)) and not isinstance(expr, (Symbol, Number))\n+\n     def _print_Subs(self, subs):\n         expr, old, new = subs.args\n         latex_expr = self._print(expr)\n         latex_old = (self._print(e) for e in old)\n         latex_new = (self._print(e) for e in new)\n-        latex_subs = r'\\\\ '.join(\n-            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))\n-        return r'\\left. %s \\right|_{\\substack{ %s }}' % (latex_expr,\n-                                                         latex_subs)\n-\n+        latex_subs = r\"\\\\ \".join(\n+            e[0] + \"=\" + e[1] for e in zip(latex_old, latex_new))\n+        if self._needs_parentheses(expr):\n+            return r\"\\left. \\left(%s\\right) \\right|_{\\substack{ %s }}\" % (latex_expr,\n+                                                                         latex_subs)\n+        else:\n+            return r\"\\left. %s \\right|_{\\substack{ %s }}\" % (latex_expr,\n+                                                         latex_subs)\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 49,
+      "parent_id": "t0",
+      "strategy": "`sympy/printing/latex.py` - Create a new helper method that detects when parentheses should be added and modify the main printer logic ```python # In sympy/printing/latex.py, add new method and modify existing logic def _needs_parentheses(self, expr): return isinstance(expr, (Add, Mul, Pow)) and not isinstance(expr, (Symbol, Number)) def _print_Subs(self, expr): # ... existing code ... if self._needs_parentheses(expr.expr): expr_str = r\"\\left(%s\\right)\" % self._print(expr.expr) else: expr_str = ",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/printing/latex.py` - Create a new helper method that detects when parentheses should be added and modify the main printer logic ```python # In sympy/printing/latex.py, add new method and modify"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "",
+      "submitted": false,
+      "status": "completed",
+      "steps": 301,
+      "parent_id": "t0",
+      "strategy": "`sympy/core/expr.py` - Modify the `__new__` constructor of `Subs` to normalize expressions before creating the object ```python # In sympy/core/expr.py, modify the Subs.__new__ method @classmethod def __new__(cls, expr, variables, point): # Normalize the expression to handle parentheses properly if isinstance(expr, (Add, Mul, Pow)) and not isinstance(expr, (Symbol, Number)): # Store reference to normalized form pass return super().__new__(cls, expr, variables, point) ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/core/expr.py` - Modify the `__new__` constructor of `Subs` to normalize expressions before creating the object ```python # In sympy/core/expr.py, modify the Subs.__new__ method @classmethod def"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "",
+      "submitted": true,
+      "status": "completed",
+      "steps": 81,
+      "parent_id": "t0",
+      "strategy": "`sympy/printing/latex.py` - Change the LaTeX printing logic by modifying how operators interact with Subs in the printer's precedence handling ```python # In sympy/printing/latex.py, modify the operator precedence handling in the printer def _print_Mul(self, expr): # ... existing code ... if any(isinstance(arg, Subs) for arg in expr.args): # Apply special formatting for Subs within multiplication terms = [] for arg in expr.args: if isinstance(arg, Subs): terms.append(r\"\\left(%s\\right)\" % self._p",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/printing/latex.py` - Change the LaTeX printing logic by modifying how operators interact with Subs in the printer's precedence handling ```python # In sympy/printing/latex.py, modify the operat"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

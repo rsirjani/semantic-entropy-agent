@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-18189",
+  "elapsed_seconds": 757.088760137558,
+  "total_steps": 290,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\nindex 6092e35dab..dbae9eedaa 100644\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -179,7 +179,7 @@ def diophantine(eq, param=symbols(\"t\", integer=True), syms=None,\n                 raise TypeError(\n                     'syms should be given as a sequence, e.g. a list')\n             syms = [i for i in syms if i in var]\n-            if syms != var:\n+            if syms != var and not permute:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n                 return {tuple([t[dict_sym_index[i]] for i in var])\n                             for t in diophantine(eq, param)}\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 131,
+      "parent_id": null,
+      "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 180-190 \u2014 Change the symbol remapping logic to ensure `dict_sym_index` is properly used for all permutation operations, not just the final result formatting. Specifically, replace the current approach where `dict_sym_index` is only used for output formatting with an earlier application that standardizes the variable order before permutation logic executes.",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\nindex 6092e35dab..61bcab6f72 100644\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -182,7 +182,7 @@ def diophantine(eq, param=symbols(\"t\", integer=True), syms=None,\n             if syms != var:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n                 return {tuple([t[dict_sym_index[i]] for i in var])\n-                            for t in diophantine(eq, param)}\n+                            for t in diophantine(eq, syms=syms, param=param)}\n         n, d = eq.as_numer_denom()\n         if n.is_number:\n             return set()\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 24,
+      "parent_id": "t0",
+      "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 217-240 \u2014 Add a new preprocessing step that normalizes the variable order based on `syms` parameter before applying the permutation sign logic, ensuring consistent handling regardless of input symbol order by creating a canonical variable sequence that respects user-provided ordering.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 217-240 \u2014 Add a new preprocessing step that normalizes the variable order based on `syms` parameter before applying the perm"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\nindex 1234567..89abcdef 100644\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -50,6 +50,20 @@ def _is_int(i):\n     return i % 2 == 0\n\n+def _normalize_variable_order(syms, var):\n+    \"\"\"\n+    Normalize variable order to ensure consistent behavior regardless of syms parameter.\n+    \n+    This helper function ensures that when syms != var, the transformation\n+    works consistently by standardizing the variable ordering.\n+    \"\"\"\n+    if not syms:\n+        return var\n+    # Return syms in a consistent order for processing\n+    return sorted(syms, key=str)\n\n def _rational_pq(a, b):\n     # return `(numer, denom)` for a/b; sign in numer and gcd removed\n     return _remove_gcd(sign(b)*a, abs(b))\n\n@@ -180,10 +190,12 @@ def diophantine(eq, param=t, syms=None, permute=False):\n             if syms != var:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n-                return {tuple([t[dict_sym_index[i]] for i in var])\n-                            for t in diophantine(eq, param)}\n+                # Apply normalization to ensure consistent variable handling\n+                normalized_syms = _normalize_variable_order(syms, var)\n+                return {tuple([t[dict_sym_index[i]] for i in var])\n+                            for t in diophantine(eq, param, syms=normalized_syms)}\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 96,
+      "parent_id": "t0",
+      "strategy": "`sympy/solvers/diophantine.py` - Create a new helper function `normalize_variable_order` at lines 50-70 \u2014 Introduce a dedicated utility function that takes `syms` and `var` parameters and returns a standardized variable list that preserves the user-specified order, then integrate this into the main `diophantine` function to ensure consistent variable processing throughout the algorithm.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/solvers/diophantine.py` - Create a new helper function `normalize_variable_order` at lines 50-70 \u2014 Introduce a dedicated utility function that takes `syms` and `var` parameters and returns a st"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\nindex 6092e35dab..2dbfc76bf9 100644\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -182,7 +182,7 @@ def diophantine(eq, param=symbols(\"t\", integer=True), syms=None,\n             if syms != var:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n                 return {tuple([t[dict_sym_index[i]] for i in var])\n-                            for t in diophantine(eq, param)}\n+                            for t in diophantine(eq, param, syms=syms)}\n         n, d = eq.as_numer_denom()\n         if n.is_number:\n             return set()\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 26,
+      "parent_id": "t0",
+      "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 170-190 \u2014 Implement early validation that ensures `syms` parameter is processed and normalized to match internal variable handling, adding a check that verifies the variable sequence matches expected internal format before proceeding to permutation logic.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 170-190 \u2014 Implement early validation that ensures `syms` parameter is processed and normalized to match internal variable ha"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/solvers/diophantine.py b/sympy/solvers/diophantine.py\nindex 6092e35dab..61bcab6f72 100644\n--- a/sympy/solvers/diophantine.py\n+++ b/sympy/solvers/diophantine.py\n@@ -182,7 +182,7 @@ def diophantine(eq, param=symbols(\"t\", integer=True), syms=None,\n             if syms != var:\n                 dict_sym_index = dict(zip(syms, range(len(syms))))\n                 return {tuple([t[dict_sym_index[i]] for i in var])\n-                            for t in diophantine(eq, param)}\n+                            for t in diophantine(eq, syms=syms, param=param)}\n         n, d = eq.as_numer_denom()\n         if n.is_number:\n             return set()",
+      "submitted": true,
+      "status": "completed",
+      "steps": 13,
+      "parent_id": "t0",
+      "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 220-240 \u2014 Refactor the permutation sign detection logic to include a symbol-order-aware decision engine that uses the user-provided `syms` ordering to determine when to apply sign permutations, rather than relying on default variable sequence assumptions.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`sympy/solvers/diophantine.py` - Modify `diophantine` function around lines 220-240 \u2014 Refactor the permutation sign detection logic to include a symbol-order-aware decision engine that uses the user-p"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

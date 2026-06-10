@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-23534",
+  "elapsed_seconds": 577.1175892353058,
+  "total_steps": 285,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\nindex f4a555c13f..0495f822ec 100644\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -580,7 +580,7 @@ def matches(self, expr, repl_dict=None, old=False):\n         return repl_dict\n \n \n-_range = _re.compile('([0-9]*:[0-9]+|[a-zA-Z]?:[a-zA-Z])')\n+_range = _re.compile('([0-9]*:[0-9]+|[a-zA-Z]*:[a-zA-Z])')\n \n \n def symbols(names, *, cls=Symbol, **args) -> Any:\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 39,
+      "parent_id": null,
+      "strategy": "[`/testbed/sympy/core/symbol.py` line 570] \u2014 Replace the regex pattern `_range = _re.compile('([0-9]*:[0-9]+|[a-zA-Z]?:[a-zA-Z])')` with `_range = _re.compile(r'([0-9]*:[0-9]+|[a-zA-Z]*:[a-zA-Z])')` to properly match letter-based ranges by allowing optional letters before the colon.",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\nindex f4a555c13f..7d2b41498e 100644\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -790,10 +790,14 @@ def literal(s):\n \n         return tuple(result)\n     else:\n-        for name in names:\n-            result.append(symbols(name, **args))\n+for name in names:\n+            sym_result = symbols(name, **args)\n+            if isinstance(sym_result, (tuple, list)):\n+                result.extend(sym_result)\n+            else:\n+                result.append(sym_result)\n \n-        return type(names)(result)\n+        return tuple(result)\n \n \n def var(names, **args):\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 134,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/core/symbol.py` lines 650-670] \u2014 Add a new helper function `parse_symbol_range` that specifically handles letter-based range parsing before the main parsing logic, and modify the main parsing loop to delegate to this function for letter-based patterns.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/core/symbol.py` lines 650-670] \u2014 Add a new helper function `parse_symbol_range` that specifically handles letter-based range parsing before the main parsing logic, and modify the main"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\nindex f4a555c13f..569c7eb829 100644\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -791,8 +791,7 @@ def literal(s):\n         return tuple(result)\n     else:\n         for name in names:\n-            result.append(symbols(name, **args))\n-\n+            result.append(symbols(name, cls=cls, **args))\n         return type(names)(result)\n \n \n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 56,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/core/symbol.py` lines 586-700] \u2014 Modify the `symbols` function signature to accept a new keyword parameter `range_pattern` that allows overriding the default regex, and update the parsing logic to use this parameter when available.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/core/symbol.py` lines 586-700] \u2014 Modify the `symbols` function signature to accept a new keyword parameter `range_pattern` that allows overriding the default regex, and update the par"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\nindex f4a555c13f..2aca8bab27 100644\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -791,7 +791,7 @@ def literal(s):\n         return tuple(result)\n     else:\n         for name in names:\n-            result.append(symbols(name, **args))\n+            result.append(symbols(name, cls=cls, **args))\n \n         return type(names)(result)",
+      "submitted": true,
+      "status": "completed",
+      "steps": 18,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/core/symbol.py` line 600] \u2014 Introduce a preprocessing step in the `symbols` function that normalizes the input string by detecting and temporarily replacing problematic range patterns with unique placeholders before regex processing.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/core/symbol.py` line 600] \u2014 Introduce a preprocessing step in the `symbols` function that normalizes the input string by detecting and temporarily replacing problematic range patterns"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/core/symbol.py b/sympy/core/symbol.py\nindex f4a555c13f..5c9510276e 100644\n--- a/sympy/core/symbol.py\n+++ b/sympy/core/symbol.py\n@@ -737,38 +737,6 @@ def literal(s):\n         seq = args.pop('seq', as_seq)\n \n         for name in names:\n-            if not name:\n-                raise ValueError('missing symbol')\n-\n-            if ':' not in name:\n-                symbol = cls(literal(name), **args)\n-                result.append(symbol)\n-                continue\n-\n-            split: list[str] = _range.split(name)\n-            split_list: list[list[str]] = []\n-            # remove 1 layer of bounding parentheses around ranges\n-            for i in range(len(split) - 1):\n-                if i and ':' in split[i] and split[i] != ':' and \\\n-                        split[i - 1].endswith('(') and \\\n-                        split[i + 1].startswith(')'):\n-                    split[i - 1] = split[i - 1][:-1]\n-                    split[i + 1] = split[i + 1][1:]\n-            for s in split:\n-                if ':' in s:\n-                    if s.endswith(':'):\n-                        raise ValueError('missing end range')\n-                    a, b = s.split(':')\n-                    if b[-1] in string.digits:\n-                        a_i = 0 if not a else int(a)\n-                        b_i = int(b)\n-                        split_list.append([str(c) for c in range(a_i, b_i)])\n-                    else:\n-                        a = a or 'a'\n-                        split_list.append([string.ascii_letters[c] for c in range(\n-                            string.ascii_letters.index(a),\n-                            string.ascii_letters.index(b) + 1)])  # inclusive\n-                    if not split_list[-1]:\n                         break\n                 else:\n                     split_list.append([s])",
+      "submitted": true,
+      "status": "completed",
+      "steps": 38,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/core/symbol.py` lines 680-690] \u2014 Create a new validation function `validate_range_syntax` that runs before the range detection logic to check for valid letter-based range syntax and return a structured representation that bypasses the problematic regex entirely.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/core/symbol.py` lines 680-690] \u2014 Create a new validation function `validate_range_syntax` that runs before the range detection logic to check for valid letter-based range syntax and r"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

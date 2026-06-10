@@ -34,7 +34,8 @@ from src.agent.branching_defaults import VALID_DIVERSITY_METHODS, cfg
 from src.agent.phases import (
     Phase, SEARCH_PROMPT, PATCH_PROMPT, PATCH_PROMPT_WITH_STRATEGY,
     PATCH_FORCE_WRITE_MSG, VERIFY_PROMPT,
-    detect_phase_transition, is_command_allowed, is_write_command,
+    detect_phase_transition, is_command_allowed, is_forbidden_command,
+    is_write_command,
     should_end_search,
 )
 from src.agent.trajectory import Trajectory, TrajectoryManager
@@ -492,6 +493,13 @@ class PhasedOrchestrator:
             phase="SEARCH", trajectory_id=traj.trajectory_id, step=traj.step,
         )
 
+        # --- Anti-gaming veto (all phases): git history / network ---
+        if self._veto_forbidden(traj, action_cmd, "SEARCH"):
+            self.consecutive_low_relevance += 1
+            self.search_relevance_scores.append(
+                {"step": traj.step, "relevance": 0.0, "is_relevant": False})
+            return
+
         # --- Command allowlist check ---
         if action_cmd and not is_command_allowed(action_cmd, Phase.SEARCH):
             self.tracer.log(
@@ -920,6 +928,10 @@ class PhasedOrchestrator:
             phase="PATCH", trajectory_id=traj.trajectory_id, step=traj.step,
         )
 
+        # --- Anti-gaming veto (all phases): git history / network ---
+        if self._veto_forbidden(traj, action_cmd, "PATCH"):
+            return
+
         # --- Phase transition check ---
         new_phase = detect_phase_transition(thought, action_cmd, Phase.PATCH)
         if new_phase == Phase.VERIFY:
@@ -1018,6 +1030,41 @@ class PhasedOrchestrator:
         (which previously fired SDLG at the wrong point in the sdlg arm).
         """
         return is_write_command(cmd)
+
+    def _veto_forbidden(self, traj: "Trajectory", action_cmd: str, phase: str) -> bool:
+        """Block solution-leak commands (git history / network) in EVERY phase.
+
+        SWE-bench is gameable: the testbed .git holds the full upstream history
+        and the eval images have open network. This veto applies identically in
+        SEARCH/PATCH/VERIFY (unlike the SEARCH-only write veto), drops the
+        offending assistant turn, and nudges the agent to solve from the code in
+        front of it. Returns True iff the command was vetoed (caller must stop).
+        """
+        if not action_cmd:
+            return False
+        forbidden, reason = is_forbidden_command(action_cmd)
+        if not forbidden:
+            return False
+        self.tracer.log(
+            "anti_gaming.command_blocked",
+            input={"command": action_cmd[:200]},
+            output={"allowed": False, "reason": reason},
+            decision="BLOCK",
+            phase=phase, trajectory_id=traj.trajectory_id, step=traj.step,
+        )
+        if traj.agent.messages and traj.agent.messages[-1].get("role") == "assistant":
+            traj.agent.messages.pop()
+        traj.agent.add_messages({
+            "role": "user",
+            "content": (
+                f"That command is not permitted ({reason}). Solve the issue from "
+                "the source code in the repository only — do not inspect version "
+                "history (git log/show/blame) or access the network. Use grep, "
+                "cat, find, and your own reasoning."
+            ),
+        })
+        self._log_step(traj, phase=phase, blocked=action_cmd[:100])
+        return True
 
     def _apply_sdlg(
         self, traj: Trajectory, message: dict, greedy_content: str,
@@ -1335,6 +1382,10 @@ class PhasedOrchestrator:
             output={"thought": thought, "action": action_cmd, "full_content": content},
             phase="VERIFY", trajectory_id=traj.trajectory_id, step=traj.step,
         )
+
+        # --- Anti-gaming veto (all phases): git history / network ---
+        if self._veto_forbidden(traj, action_cmd, "VERIFY"):
+            return
 
         # --- SDLG in VERIFY (fallback, if enabled) ---
         is_write_cmd = action_cmd and self._is_write_command(action_cmd)

@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-19495",
+  "elapsed_seconds": 400.43113899230957,
+  "total_steps": 169,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/sets/conditionset.py b/sympy/sets/conditionset.py\nindex 118eda6f77..8afdffeb36 100644\n--- a/sympy/sets/conditionset.py\n+++ b/sympy/sets/conditionset.py\n@@ -240,7 +240,15 @@ def _eval_subs(self, old, new):\n             # the base set should be filtered and if new is not in\n             # the base set then this substitution is ignored\n             return self.func(sym, cond, base)\n-        cond = self.condition.subs(old, new)\n+        # Added explicit variable scope checking\n+        # Ensure bound variables are not accidentally replaced\n+        if old == self.sym:\n+            # Special handling for bound variable substitution\n+            cond = self.condition\n+        else:\n+            # Normal substitution for free variables\n+            cond = self.condition.subs(old, new)\n+        base = self.base_set.subs(old, new)\n         base = self.base_set.subs(old, new)\n         if cond is S.true:\n             return ConditionSet(new, Contains(new, base), base)",
+      "submitted": true,
+      "status": "completed",
+      "steps": 41,
+      "parent_id": null,
+      "strategy": "`/testbed/sympy/sets/conditionset.py` - Modify the `subs` method in `ConditionSet` class to properly handle variable substitution by adding explicit variable scope checking and ensuring bound variables are not accidentally replaced: ```python def subs(self, x, y): # Check if x is a bound variable in the condition set if isinstance(x, Symbol) and x in self.condition.free_symbols: # Skip substitution if it's a bound variable return self # Otherwise proceed with normal substitution return super().s",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/sets/fancysets.py b/sympy/sets/fancysets.py\nindex bf013522e1..46ec075b0a 100644\n--- a/sympy/sets/fancysets.py\n+++ b/sympy/sets/fancysets.py\n@@ -269,7 +269,6 @@ def __hash__(self):\n         return hash(Interval(S.NegativeInfinity, S.Infinity))\n \n \n-class ImageSet(Set):\n     \"\"\"\n     Image of a set under a mathematical function. The transformation\n     must be given as a Lambda function which has as many arguments\n@@ -384,6 +383,12 @@ def _check_sig(cls, sig_i, set_i):\n             return all(cls._check_sig(ts, ps) for ts, ps in zip(sig_i, sets))\n         else:\n             # XXX: Need a better way of checking whether a set is a set of\n+    def subs(self, x, y):\n+        # Create new lambda with substituted variables\n+        new_lambda = self.lamda.subs(x, y)\n+        # Return new ImageSet with updated lambda but preserved domain\n+        return ImageSet(new_lambda, self.base_set)\n+\n             # Tuples or not. For example a FiniteSet can contain Tuples\n             # but so can an ImageSet or a ConditionSet. Others like\n             # Integers, Reals etc can not contain Tuples. We could just\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 43,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/sets/imageset.py` - Override the `subs` method in `ImageSet` class to implement proper substitution handling by creating a new ImageSet with transformed lambda expressions and preserving the domain: ```python def subs(self, x, y): # Create new lambda with substituted variables new_lambda = self.lam.subs(x, y) # Return new ImageSet with updated lambda but preserved domain return ImageSet(new_lambda, self.base_set) ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/sets/imageset.py` - Override the `subs` method in `ImageSet` class to implement proper substitution handling by creating a new ImageSet with transformed lambda expressions and preservi"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/sets/conditionset.py b/sympy/sets/conditionset.py\nindex 118eda6f77..0e44efabe7 100644\n--- a/sympy/sets/conditionset.py\n+++ b/sympy/sets/conditionset.py\n@@ -242,24 +242,3 @@ def _eval_subs(self, old, new):\n             return self.func(sym, cond, base)\n         cond = self.condition.subs(old, new)\n         base = self.base_set.subs(old, new)\n-        if cond is S.true:\n-            return ConditionSet(new, Contains(new, base), base)\n-        return self.func(self.sym, cond, base)\n-\n-    def dummy_eq(self, other, symbol=None):\n-        if not isinstance(other, self.func):\n-            return False\n-        if isinstance(self.sym, Symbol) != isinstance(other.sym, Symbol):\n-            # this test won't be necessary when unsolved equations\n-            # syntax is removed\n-            return False\n-        if symbol:\n-            raise ValueError('symbol arg not supported for ConditionSet')\n-        o = other\n-        if isinstance(self.sym, Symbol) and isinstance(other.sym, Symbol):\n-            # this code will not need to be in an if-block when\n-            # the unsolved equations syntax is removed\n-            o = other.func(self.sym,\n-                other.condition.subs(other.sym, self.sym),\n-                other.base_set)\n-        return self == o",
+      "submitted": true,
+      "status": "completed",
+      "steps": 33,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/sets/tests/test_conditionset.py` - Add comprehensive test coverage that validates substitution behavior through a new test function that specifically tests the edge case scenario: ```python def test_conditionset_substitution_edge_case(): # Create a ConditionSet with ImageSet as base_set expr = imageset(Lambda(n, 2*n*pi + asin(y)), S.Integers) condition_set = ConditionSet(x, Contains(y, Interval(-1,1)), expr) # Test that subs works correctly without modifying the structure result ",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/sets/tests/test_conditionset.py` - Add comprehensive test coverage that validates substitution behavior through a new test function that specifically tests the edge case scenario: ```p"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/core/basic.py b/sympy/core/basic.py\nindex 8b024abea2..f7e1a08654 100644\n--- a/sympy/core/basic.py\n+++ b/sympy/core/basic.py\n@@ -787,6 +787,16 @@ def as_content_primitive(self, radical=False, clear=True):\n         return S.One, self\n \n     def subs(self, *args, **kwargs):\n+        # Handle Set objects specially to avoid variable confusion\n+        try:\n+            from sympy.sets import Set\n+            if isinstance(self, Set):\n+                # For Set objects, delegate to their specific substitution logic\n+                if hasattr(self, \"_subs\"):\n+                    return self._subs(*args, **kwargs)\n+        except ImportError:\n+            pass\n+\n         \"\"\"\n         Substitutes old for new in an expression after sympifying args.\n \n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 23,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/basic.py` - Modify the core `subs` method in the basic class to enhance substitution logic with better variable tracking for set-based objects by adding special handling for Set subclasses: ```python def subs(self, *args, **kwargs): # Special handling for Set objects to preserve their structural integrity if isinstance(self, Set) and len(args) == 2: # Ensure bound variables aren't inadvertently substituted return self._safe_substitute(*args, **kwargs) return super().subs(*ar",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/basic.py` - Modify the core `subs` method in the basic class to enhance substitution logic with better variable tracking for set-based objects by adding special handling for Set s"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/sets/conditionset.py b/sympy/sets/conditionset.py\nindex 118eda6f77..5f47e1669e 100644\n--- a/sympy/sets/conditionset.py\n+++ b/sympy/sets/conditionset.py\n@@ -187,37 +187,6 @@ def __new__(cls, sym, condition, base_set=S.UniversalSet):\n         rv = Basic.__new__(cls, sym, condition, base_set)\n         return rv if know is None else Union(know, rv)\n \n-    sym = property(lambda self: self.args[0])\n-    condition = property(lambda self: self.args[1])\n-    base_set = property(lambda self: self.args[2])\n-\n-    @property\n-    def free_symbols(self):\n-        s, c, b = self.args\n-        return (c.free_symbols - s.free_symbols) | b.free_symbols\n-\n-    def _contains(self, other):\n-        return And(\n-            Contains(other, self.base_set),\n-            Lambda(self.sym, self.condition)(other))\n-\n-    def as_relational(self, other):\n-        return And(Lambda(self.sym, self.condition)(\n-            other), self.base_set.contains(other))\n-\n-    def _eval_subs(self, old, new):\n-        if not isinstance(self.sym, Expr):\n-            # Don't do anything with the equation set syntax;\n-            # that should go away, eventually.\n-            return self\n-        sym, cond, base = self.args\n-        if old == sym:\n-            # we try to be as lenient as possible to allow\n-            # the dummy symbol to be changed\n-            base = base.subs(old, new)\n-            if isinstance(new, Symbol):\n-                # if the assumptions don't match, the cond\n-                # might evaluate or change\n                 if (new.assumptions0 == old.assumptions0 or\n                         len(new.assumptions0) == 1 and\n                         old.is_commutative == new.is_commutative):\n@@ -240,15 +209,6 @@ def _eval_subs(self, old, new):\n             # the base set should be filtered and if new is not in\n             # the base set then this substitution is ignored\n             return self.func(sym, cond, base)\n-        cond = self.condition.subs(old, new)\n-        base = self.base_set.subs(old, new)\n-        if cond is S.true:\n-            return ConditionSet(new, Contains(new, base), base)\n-        return self.func(self.sym, cond, base)\n-\n-    def dummy_eq(self, other, symbol=None):\n-        if not isinstance(other, self.func):\n-            return False\n         if isinstance(self.sym, Symbol) != isinstance(other.sym, Symbol):\n             # this test won't be necessary when unsolved equations\n             # syntax is removed",
+      "submitted": true,
+      "status": "completed",
+      "steps": 29,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/sets/conditionset.py` - Implement a complete rewrite of the `subs` method using a visitor pattern approach that analyzes the structure of both the condition and the base set before applying any substitution: ```python def subs(self, x, y): # Use visitor pattern to analyze and safely substitute from sympy.core.traversal import preorder_traversal # First validate that x is not part of the set's defining symbols condition_free_vars = self.condition.free_symbols if x in condition_fre",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/sets/conditionset.py` - Implement a complete rewrite of the `subs` method using a visitor pattern approach that analyzes the structure of both the condition and the base set before app"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

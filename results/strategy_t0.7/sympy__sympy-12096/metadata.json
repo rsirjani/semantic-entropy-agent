@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-12096",
+  "elapsed_seconds": 717.5586221218109,
+  "total_steps": 244,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d..35019a5f0 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -505,12 +505,16 @@ def _eval_evalf(self, prec):\n                 from sympy.utilities.lambdify import MPMATH_TRANSLATIONS\n                 fname = MPMATH_TRANSLATIONS[fname]\n             func = getattr(mpmath, fname)\n+\n         except (AttributeError, KeyError):\n             try:\n-                return Float(self._imp_(*self.args), prec)\n+                result = self._imp_(*self.args)\n+                if hasattr(result, \"evalf\"):\n+                    return result.evalf(prec)\n+                else:\n+                    return Float(result, prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n-\n         # Convert all args to mpf or mpc\n         # Convert the arguments to *higher* precision than requested for the\n         # final result.\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 41,
+      "parent_id": null,
+      "strategy": "`/testbed/sympy/core/function.py` `Function._eval_evalf` \u2014 Replace the fallback logic to recursively call `evalf` on the result of `_imp_` instead of returning a raw `Float`: ```python def _eval_evalf(self, prec): # Lookup mpmath function based on name fname = self.func.__name__ try: if not hasattr(mpmath, fname): from sympy.utilities.lambdify import MPMATH_TRANSLATIONS fname = MPMATH_TRANSLATIONS[fname] func = getattr(mpmath, fname) except (AttributeError, KeyError): try: result = self._imp_(*s",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/utilities/lambdify.py b/sympy/utilities/lambdify.py\nindex 1234567..89abcde 100644\n--- a/sympy/utilities/lambdify.py\n+++ b/sympy/utilities/lambdify.py\n@@ -653,15 +653,25 @@ def implemented_function(symfunc, implementation):\n     # Delayed import to avoid circular imports\n     from sympy.core.function import UndefinedFunction\n     # if name, create function to hold implementation\n-    if isinstance(symfunc, string_types):\n+    # Create a proper function class that handles evalf correctly\n+    class ImplementedFunction(UndefinedFunction):\n+        _imp_ = staticmethod(implementation)\n+        \n+        def evalf(self, prec=None):\n+            # Ensure recursive evaluation is handled properly\n+            if prec is None:\n+                prec = 50\n+            # Call the parent evalf method to ensure proper handling\n+            return super().evalf(prec)\n+\n+    if isinstance(symfunc, string_types):\n         symfunc = UndefinedFunction(symfunc)\n     elif not isinstance(symfunc, UndefinedFunction):\n         raise ValueError('symfunc should be either a string or'\n                         ' an UndefinedFunction instance.')\n-    # We need to attach as a method because symfunc will be a class\n-    symfunc._imp_ = staticmethod(implementation)\n-    return symfunc\n+    # Return the implemented function with proper evalf handling\n+    return ImplementedFunction()\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 33,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/utilities/lambdify.py` `implemented_function` \u2014 Modify the `implemented_function` class to override `evalf` method to ensure recursive evaluation: ```python def implemented_function(name, impl): class ImplementedFunction(Function): _imp_ = impl __slots__ = () def evalf(self, prec=None): # Ensure recursive evaluation is handled properly if prec is None: prec = 50 return self._eval_evalf(prec) # ... rest of the class remains unchanged ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/utilities/lambdify.py` `implemented_function` \u2014 Modify the `implemented_function` class to override `evalf` method to ensure recursive evaluation: ```python def implemented_function(na"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d..d4bd3c89a 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -498,15 +498,26 @@ def is_commutative(self):\n             return False\n \n     def _eval_evalf(self, prec):\n+    def _eval_evalf(self, prec):\n+        # Lookup mpmath function based on name\n         # Lookup mpmath function based on name\n         fname = self.func.__name__\n+        fname = self.func.__name__\n         try:\n+        try:\n+            if not hasattr(mpmath, fname):\n             if not hasattr(mpmath, fname):\n+                from sympy.utilities.lambdify import MPMATH_TRANSLATIONS\n                 from sympy.utilities.lambdify import MPMATH_TRANSLATIONS\n                 fname = MPMATH_TRANSLATIONS[fname]\n+                fname = MPMATH_TRANSLATIONS[fname]\n+            func = getattr(mpmath, fname)\n             func = getattr(mpmath, fname)\n+        except (AttributeError, KeyError):\n         except (AttributeError, KeyError):\n             try:\n+            try:\n+                return Float(self._imp_(*self.args), prec)\n                 return Float(self._imp_(*self.args), prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 84,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/expr.py` `Expr.evalf` \u2014 Enhance the top-level `evalf` method to detect and handle implemented functions with nested calls: ```python def evalf(self, prec=None, options={}): # ... existing code ... if hasattr(self, '_imp_') and hasattr(self, 'args'): # Special handling for implemented functions with nested calls try: # Try to get the numerical result directly result = self._imp_(*self.args) if hasattr(result, 'evalf'): return result.evalf(prec) except Exception: pass # ... co",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/expr.py` `Expr.evalf` \u2014 Enhance the top-level `evalf` method to detect and handle implemented functions with nested calls: ```python def evalf(self, prec=None, options={}): # ... "
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d..c0e2dd2cf 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -507,14 +507,13 @@ def _eval_evalf(self, prec):\n             func = getattr(mpmath, fname)\n         except (AttributeError, KeyError):\n             try:\n-                return Float(self._imp_(*self.args), prec)\n+                result = self._imp_(*self.args)\n+                # Ensure recursive evaluation if result is symbolic\n+                if hasattr(result, \"evalf\") and not isinstance(result, (int, float, complex)):\n+                    return result.evalf(prec)\n+                return Float(result, prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n-\n-        # Convert all args to mpf or mpc\n-        # Convert the arguments to *higher* precision than requested for the\n-        # final result.\n-        # XXX + 5 is a guess, it is similar to what is used in evalf.py. Should\n         #     we be more intelligent about it?\n         try:\n             args = [arg._to_mpmath(prec + 5) for arg in self.args]",
+      "submitted": true,
+      "status": "completed",
+      "steps": 19,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/function.py` `Function._eval_evalf` \u2014 Add a wrapper around `_imp_` calls to ensure proper argument handling and recursion: ```python def _eval_evalf(self, prec): # Lookup mpmath function based on name fname = self.func.__name__ try: if not hasattr(mpmath, fname): from sympy.utilities.lambdify import MPMATH_TRANSLATIONS fname = MPMATH_TRANSLATIONS[fname] func = getattr(mpmath, fname) except (AttributeError, KeyError): try: # Wrap the call to ensure proper handling of complex ",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/function.py` `Function._eval_evalf` \u2014 Add a wrapper around `_imp_` calls to ensure proper argument handling and recursion: ```python def _eval_evalf(self, prec): # Lookup mpmath f"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 1b8005e1d..7e1afc122 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -507,7 +507,11 @@ def _eval_evalf(self, prec):\n             func = getattr(mpmath, fname)\n         except (AttributeError, KeyError):\n             try:\n-                return Float(self._imp_(*self.args), prec)\n+        result = self._imp_(*self.args)\n+        if hasattr(result, \"evalf\"):\n+            return result.evalf(prec)\n+        else:\n+            return Float(result, prec)\n             except (AttributeError, TypeError, ValueError):\n                 return\n \n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 67,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/function.py` `Function._eval_evalf` \u2014 Add a new helper method to handle recursive evaluation logic and replace current fallback behavior: ```python def _eval_evalf(self, prec): # Lookup mpmath function based on name fname = self.func.__name__ try: if not hasattr(mpmath, fname): from sympy.utilities.lambdify import MPMATH_TRANSLATIONS fname = MPMATH_TRANSLATIONS[fname] func = getattr(mpmath, fname) except (AttributeError, KeyError): try: # Use a dedicated helper to process th",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/function.py` `Function._eval_evalf` \u2014 Add a new helper method to handle recursive evaluation logic and replace current fallback behavior: ```python def _eval_evalf(self, prec): # "
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

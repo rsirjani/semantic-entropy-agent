@@ -666,6 +666,44 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    LLMs to correct their own mistakes tends to be largely ineffective"), which is
    out of scope for an inference-time method. Both are stated as future-work arms,
    not silently omitted.
+13. **Benchmark gameability & data contamination.** SWE-bench is gameable, and we
+   separate the part we can control from the part we cannot.
+   *Controlled — in-run information leaks (closed by construction, both arms):*
+   (i) the testbed repository's `.git` contains the **full upstream history**, so
+   the gold patch is reachable through `git show <commit>:<file>`, `git log`,
+   `git blame`, or any ref-bearing `git diff` — we **veto** every history-revealing
+   git invocation in *all three phases* for *both* arms (`is_forbidden_command`,
+   `src/agent/phases.py`; allowed: bare `git diff`/`git status`/`git stash`/
+   `git add` for the submit protocol; pinned by `tests/test_anti_gaming.py`).
+   (ii) The sweb eval images have **open internet by default** — we measured this
+   (a `pip download six` succeeds in the unmodified image) — so the upstream PR/
+   issue is fetchable; we run every agent container with **`--network none`**
+   (`build_env_config`, verified: the same `pip download` then fails) and
+   additionally veto network commands (`curl`/`wget`/`pip install`/`git clone`…)
+   as defense-in-depth. The control arm shares the identical scaffold, so any
+   residual leak channel is symmetric and cannot manufacture a treatment effect.
+   *Audited — the archived run-1 pilot:* a scan of all 2,184 logged actions found
+   **zero** history-access or network-fetch attempts before these guards existed
+   (the only non-read commands were three `pip install mpmath` that silently
+   no-op'd, and two benign `git show HEAD:<file>` reads of the *base* commit, which
+   reveal nothing — both now vetoed regardless).
+   *Acknowledged — pretraining contamination (uncontrollable):* Qwen3-Coder-30B's
+   training data is unknown to us, and these SymPy issues are old, public, and
+   almost certainly present in any large code-pretraining corpus *together with
+   their merged fixes*. We cannot rule out that the base model has memorized a gold
+   patch. Three mitigating arguments, none a guarantee: (1) the contribution is a
+   **within-model, between-condition** contrast (branching vs matched-k resampling
+   of the *same* contaminated model) — contamination inflates *both* arms' absolute
+   resolve rates and largely cancels in the paired gain, which is the only
+   confirmatory quantity; (2) the headline endpoint is **diversity** (rarefied
+   distinct-patch gain), not resolve rate, and memorization predicts *less*
+   diversity (convergence on the memorized fix), biasing H1 *against* us; (3) the
+   residual `python -c "open(...,'w')"` programmatic-write channel (undetectable
+   from the command string) is documented in `is_write_command` and is the one
+   in-run gap we cannot close at the string level — the container network block is
+   the backstop. A clean test of contamination (post-cutoff instances, or a
+   repository the model demonstrably never saw) is the right follow-up and is out
+   of scope for this n=10 SymPy pilot.
 
 ---
 

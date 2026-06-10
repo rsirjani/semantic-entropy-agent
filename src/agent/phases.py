@@ -72,6 +72,74 @@ PHASE_ALLOWED_COMMANDS = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Anti-gaming: forbid commands that can read the solution, in EVERY phase.
+# --------------------------------------------------------------------------- #
+#
+# SWE-bench is gameable: the testbed repo's .git contains the FULL upstream
+# history, so `git log`/`git show`/`git blame` past the base commit reveal the
+# gold patch, and the network (open by default in the eval images, measured
+# 2026-06-10) lets the agent fetch the PR/issue. These are NOT phase-specific —
+# they must be blocked in SEARCH, PATCH, and VERIFY alike. Network is also
+# hard-blocked at the container level (`--network none`, build_env_config);
+# this command veto is defense-in-depth and the only guard for the git vector
+# (the .git history is legitimately present for the harness's own diffing).
+#
+# Git subcommands that never reveal history beyond the working tree. They are
+# allowed ONLY with flag arguments (no positional ref/path), because a ref turns
+# a safe subcommand into a history peek (`git diff HEAD~5`, `git diff master`).
+# The submit protocol only ever runs a bare `git diff` (+ redirect), so this
+# strictness costs nothing legitimate.
+_GIT_SAFE_SUBCMDS = {"diff", "status", "stash", "add", "apply"}
+_GIT_TOKEN_RE = re.compile(r"\bgit\b\s+(.*)", re.I | re.S)
+# Network fetchers (belt-and-suspenders behind --network none).
+_NETWORK_RE = re.compile(
+    r"\b(curl|wget|nc|ncat|netcat|ssh|scp|rsync|telnet|ftp|"
+    r"pip\s+(?:install|download)|conda\s+install|"
+    r"git\s+(?:clone|fetch|pull|remote))\b",
+    re.I,
+)
+
+
+def _git_segment_forbidden(seg: str) -> bool:
+    """True if a segment invokes git in a history-revealing way."""
+    m = _GIT_TOKEN_RE.search(seg)
+    if not m:
+        return False
+    # Tokens after `git`, dropping redirect targets (`> file`, `>> file`).
+    rest = re.sub(r"\d?>>?\s*\S+", " ", m.group(1)).split()
+    if not rest:
+        return True  # bare `git` — disallow (no legitimate use here)
+    sub = rest[0].lower()
+    if sub not in _GIT_SAFE_SUBCMDS:
+        return True  # log / show / blame / reflog / rev-list / cat-file / ...
+    # Safe subcommand: forbid if it carries any POSITIONAL arg (a ref or path).
+    # Everything after `--` is a pathspec (safe); before it, only flags allowed.
+    for tok in rest[1:]:
+        if tok == "--":
+            break
+        if not tok.startswith("-"):
+            return True  # e.g. `git diff HEAD~5`, `git diff master file.py`
+    return False
+
+
+def is_forbidden_command(command: str) -> tuple[bool, str]:
+    """Solution-leak veto applied in EVERY phase. Returns (forbidden, reason).
+
+    Checks each top-level `&&`/`;`/`|` segment so a forbidden command cannot
+    hide behind an allowed prefix (`cat x && git show <sha>`).
+    """
+    for seg in re.split(r"&&|\|\||;|\|", command):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if _git_segment_forbidden(seg):
+            return True, "git history access (SWE-bench gold-patch leak vector)"
+        if _NETWORK_RE.search(seg):
+            return True, "network access (upstream-fix leak vector)"
+    return False, ""
+
+
 def is_command_allowed(command: str, phase: Phase) -> bool:
     """Check if a bash command is allowed in the given phase.
 

@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-22714",
+  "elapsed_seconds": 380.27235746383667,
+  "total_steps": 161,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 73c20334d0..ad1d68128d 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -152,7 +152,7 @@ def __new__(cls, *args, **kwargs):\n                         'warn' or 'ignore'.'''))\n         if any(coords[dim:]):\n             raise ValueError('Nonzero coordinates cannot be removed.')\n-        if any(a.is_number and im(a) for a in coords):\n+        if any(a.is_number and im(a) != 0 for a in coords):\n             raise ValueError('Imaginary coordinates are not permitted.')\n         if not all(isinstance(a, Expr) for a in coords):\n             raise TypeError('Coordinates must be valid SymPy expressions.')",
+      "submitted": true,
+      "status": "completed",
+      "steps": 27,
+      "parent_id": null,
+      "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Replace the imaginary coordinate check with a more robust validation that considers the mathematical nature rather than just the symbolic representation by adding a try-except block that attempts to extract real parts and checking if the result is actually real.",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 73c20334d0..ad1d68128d 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -152,7 +152,7 @@ def __new__(cls, *args, **kwargs):\n                         'warn' or 'ignore'.'''))\n         if any(coords[dim:]):\n             raise ValueError('Nonzero coordinates cannot be removed.')\n-        if any(a.is_number and im(a) for a in coords):\n+        if any(a.is_number and im(a) != 0 for a in coords):\n             raise ValueError('Imaginary coordinates are not permitted.')\n         if not all(isinstance(a, Expr) for a in coords):\n             raise TypeError('Coordinates must be valid SymPy expressions.')\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 17,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Modify the validation logic to first normalize coordinates using `as_real_imag()` method before checking for imaginary components, specifically altering lines 156-156 to use a more comprehensive check that accounts for symbolic representations under `evaluate=False`.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Modify the validation logic to first normalize coordinates using `as_real_imag()` method before checking for imaginary components, specificall"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "Fix successfully implemented in sympy/geometry/point.py\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 78,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Introduce a new helper function called `_is_mathematically_real` that properly validates coordinates regardless of evaluation status, replacing the direct `im(a)` check with a more reliable mathematical validation approach.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Introduce a new helper function called `_is_mathematically_real` that properly validates coordinates regardless of evaluation status, replacin"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 73c20334d0..ad1d68128d 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -152,7 +152,7 @@ def __new__(cls, *args, **kwargs):\n                         'warn' or 'ignore'.'''))\n         if any(coords[dim:]):\n             raise ValueError('Nonzero coordinates cannot be removed.')\n-        if any(a.is_number and im(a) for a in coords):\n+        if any(a.is_number and im(a) != 0 for a in coords):\n             raise ValueError('Imaginary coordinates are not permitted.')\n         if not all(isinstance(a, Expr) for a in coords):\n             raise TypeError('Coordinates must be valid SymPy expressions.')",
+      "submitted": true,
+      "status": "completed",
+      "steps": 16,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Add preprocessing logic before coordinate validation to force evaluation of numeric coordinates when `evaluate=False` is set, by modifying the coordinate processing section to temporarily enable evaluation for validation purposes.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Add preprocessing logic before coordinate validation to force evaluation of numeric coordinates when `evaluate=False` is set, by modifying the"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/geometry/point.py b/sympy/geometry/point.py\nindex 73c20334d0..3ef064ddda 100644\n--- a/sympy/geometry/point.py\n+++ b/sympy/geometry/point.py\n@@ -152,7 +152,22 @@ def __new__(cls, *args, **kwargs):\n                         'warn' or 'ignore'.'''))\n         if any(coords[dim:]):\n             raise ValueError('Nonzero coordinates cannot be removed.')\n-        if any(a.is_number and im(a) for a in coords):\n+            # Handle the case where evaluate(False) might affect how im() works\n+            try:\n+                # If it has an imaginary part that is not zero, it's truly imaginary\n+                imag_part = im(coord)\n+                # For evaluate(False), we need to be more careful about symbolic representations\n+                if hasattr(imag_part, 'is_zero'):\n+                    return not imag_part.is_zero\n+                else:\n+                    # Check if it's actually a non-zero imaginary part\n+                    return bool(imag_part) and not (hasattr(imag_part, 'is_number') and imag_part.is_number and imag_part == 0)\n+            except:\n+                # Fallback for cases where im() doesn't work properly\n+                return False\n+\n+        # More robust check for imaginary coordinates\n+        if any(a.is_number and _is_truly_imaginary(a) for a in coords):\n             raise ValueError('Imaginary coordinates are not permitted.')\n         if not all(isinstance(a, Expr) for a in coords):\n             raise TypeError('Coordinates must be valid SymPy expressions.')",
+      "submitted": true,
+      "status": "completed",
+      "steps": 23,
+      "parent_id": "t0",
+      "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Change the validation mechanism entirely by implementing a custom coordinate type checker that distinguishes between truly complex numbers and symbolic representations that will eventually resolve to reals, by replacing the existing validation with a comprehensive type analysis function.",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "[`/testbed/sympy/geometry/point.py` in `Point.__new__`] \u2014 Change the validation mechanism entirely by implementing a custom coordinate type checker that distinguishes between truly complex numbers and"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

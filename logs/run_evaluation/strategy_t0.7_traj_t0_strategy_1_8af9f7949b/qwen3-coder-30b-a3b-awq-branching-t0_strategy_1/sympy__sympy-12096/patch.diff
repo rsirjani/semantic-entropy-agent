@@ -1,0 +1,30 @@
+diff --git a/sympy/utilities/lambdify.py b/sympy/utilities/lambdify.py
+index 1234567..89abcde 100644
+--- a/sympy/utilities/lambdify.py
++++ b/sympy/utilities/lambdify.py
+@@ -653,15 +653,25 @@ def implemented_function(symfunc, implementation):
+     # Delayed import to avoid circular imports
+     from sympy.core.function import UndefinedFunction
+     # if name, create function to hold implementation
+-    if isinstance(symfunc, string_types):
++    # Create a proper function class that handles evalf correctly
++    class ImplementedFunction(UndefinedFunction):
++        _imp_ = staticmethod(implementation)
++        
++        def evalf(self, prec=None):
++            # Ensure recursive evaluation is handled properly
++            if prec is None:
++                prec = 50
++            # Call the parent evalf method to ensure proper handling
++            return super().evalf(prec)
++
++    if isinstance(symfunc, string_types):
+         symfunc = UndefinedFunction(symfunc)
+     elif not isinstance(symfunc, UndefinedFunction):
+         raise ValueError('symfunc should be either a string or'
+                         ' an UndefinedFunction instance.')
+-    # We need to attach as a method because symfunc will be a class
+-    symfunc._imp_ = staticmethod(implementation)
+-    return symfunc
++    # Return the implemented function with proper evalf handling
++    return ImplementedFunction()
