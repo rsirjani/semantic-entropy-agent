@@ -150,8 +150,16 @@ methods in `PDFs/`. Each sub-item names the source of truth.
 - **R1.2 — Semantic entropy & bidirectional-entailment clustering**
   (Farquhar 2024 `PDFs/farquhar_nature.pdf`; Kuhn 2023
   `PDFs/Farquhar_2024_Semantic_Entropy.pdf`, Alg. 1). The `greedy` clusterer must
-  reproduce Algorithm 1; clustering is **context-conditioned** (problem statement
-  prepended) consistently at every call site. Discrete SE = `-Σ p_c log p_c`.
+  reproduce Algorithm 1; clustering applies a **consistent context policy at
+  every call site** — for this project the NLI context is deliberately **empty**,
+  a documented deviation from Kuhn's QA-style context-conditioning: prepending a
+  shared problem-statement prefix to both sides saturates DeBERTa entailment on
+  self-contained strategy/intent sentences (measured on the archived Phase A
+  run-1: all pairs of five structurally distinct strategies score ≥0.94
+  entailment WITH the prefix vs ≤0.55 without — the gate was measuring the
+  prefix, not the strategies; reproduce with
+  `scripts/diagnose_context_saturation.py`, pinned by
+  `tests/test_clustering_context.py`). Discrete SE = `-Σ p_c log p_c`.
 - **R1.3 — Clustering ablation variants.** `connected` (order-independent
   transitive closure) and `kernel` (Kernel Language Entropy, Nikitin 2024 — a
   genuine graph heat kernel `exp(-tL)`, von Neumann entropy of `ρ=K_t/tr K_t`,
@@ -177,7 +185,17 @@ deviation from a paper is intentional and documented (not a bug).
 - **R2.3 — Scaffold-matched:** the control is the *same phased agent* with
   branching disabled — NOT the legacy `ReactAgent` baseline (that confounds
   branching with a different harness). Confirm the comparison used in the paper
-  uses the phased `none` arm.
+  uses the phased `none` arm. **Scaffold-matched includes code-revision-matched:**
+  every arm of a compared cell must be produced by the SAME committed code
+  revision — the campaign pins HEAD at start (`code_revision` in the campaign
+  state, stamped into the artifacts' provenance) and refuses to run any step
+  after a commit/checkout or with tracked files modified. The need is measured,
+  not hypothetical: Phase A run-2's treatment ran hours before the anti-gaming
+  veto and container network isolation were committed, so the matched-k control
+  would have faced a behavioral envelope (and a closed network) the treatment
+  never did — 13.6% of the treatment's actions would have been vetoed under the
+  guard the control would run with; the cell was archived as a protocol
+  deviation rather than completed asymmetrically.
 - **R2.4 — Temperature-matched:** one `sample_temperature` knob drives both the
   proposer and the vanilla baseline; the headline runs a sweep (0.2/0.7/1.0).
   Vanilla MUST sample at T>0 (temp=0 = deterministic = a strawman). The documented

@@ -131,6 +131,22 @@ read as writes (2 pilot false positives — in the SDLG arm a false positive
 before the first real write would corrupt that instance's branch point), and
 writes hidden in non-final `&&` segments no longer escape detection. Both
 arms run the identical phase machinery, so these guards are symmetric.
+Two iteration-15 additions in the same class: (iii) *strict, deletion-aware
+fork cloning* — the SDLG arm's container-state replicator
+(`clone_container_state`) previously degraded silently on every failure path
+(a git-listing failure read as "nothing to clone", per-file copy failures
+skipped, and file deletions structurally unpropagatable via `docker cp`),
+so a fork could start from a state that is not its parent's while its
+results were still attributed to the SDLG mechanism; it now raises on any
+incomplete clone (the existing failed-at-creation draw accounting takes
+over, R7.2) and propagates deletions explicitly. (iv) *elided-output
+visibility* — the strategy proposer's search report matched only the
+`<output>` observation tag, silently dropping observations long enough to
+be rendered as `<output_head>`/`<output_tail>` (measured: 3 of 120
+SEARCH-phase pilot observations — exactly the longest, often most
+code-rich outputs); both tags are now included. This affects only the
+treatment's mechanism input (the control has no proposer) and is fixed
+before any confirmatory run.
 
 ### 2.2 Matched budget & temperature
 
@@ -526,7 +542,8 @@ cap (max passing = 164 steps), so the step-limit asymmetry did not manufacture w
 Cost in $ is omitted only because the local vLLM model is unregistered for litellm
 cost calculation; tokens and steps are the compute proxies. **Known undercount,
 disclosed:** the treatment arm's strategy-proposer call, intent-extraction
-sub-calls, and DeBERTa-NLI forward passes are not stored in the per-trajectory
+sub-calls, the SDLG arm's alternative-completion calls, and DeBERTa-NLI forward
+passes are not stored in the per-trajectory
 `.traj.json` transcripts and are excluded from these sums — the exclusion is
 bounded (one proposer call and O(N²)=10 NLI pair passes of a 0.4B model per
 instance, vs k full agent trajectories) and works *against* the fairness claim's
@@ -654,6 +671,29 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    reported here; the re-run with the fixed instrument is the confirmatory
    dataset. The context-conditioning removal is documented at every call site
    and pinned by `tests/test_clustering_context.py`.
+
+   **Protocol deviation — Phase A run-2 archived (2026-06-10), code-revision
+   asymmetry.** The second Phase A treatment run executed at 07:13 from the
+   then-current revision; the anti-gaming guard set (the command veto AND
+   container `--network none`) was committed at 09:52 the same morning — after
+   the treatment finished but before the matched-k control ever ran. The two
+   arms of the confirmatory cell would therefore have been produced under
+   different scaffolds: the treatment had open container network (its 22
+   `pip install mpmath` attempts could genuinely reach PyPI) and no command
+   veto, while the control would have had neither. Measured asymmetry from the
+   archived artifacts: 209 of the treatment's 1,539 actions (13.6%) would have
+   been vetoed under the original 09:52 guard — though 163 of those were guard
+   FALSE POSITIVES (heredoc patch-file content read as git invocations), found
+   by exactly this audit and fixed (threat 13); under the corrected guard the
+   genuine asymmetry is 33/1,528 actions (2.2%: 22 network attempts + 11
+   ref-ambiguous git forms). The deviation was decided while **no
+   treatment-vs-control comparison existed** (the control arm never ran, so no
+   paired outcome could be chased); run-2 is archived in full
+   (`results/archive_run2_preguard/`). Recurrence is structurally blocked: the
+   campaign driver pins the git revision at start (`code_revision` in
+   `campaign_state.json`) and refuses any step after a commit/checkout or with
+   tracked files modified (R2.3 code-revision symmetry; pinned by
+   `tests/test_run_campaign.py::test_guardrails_enforce_code_revision_symmetry`).
 12. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
    (Fig. 5) shows prompting "give me a different answer" with prior answers in
    context recovers much diversity in open-ended NL. We do not run this arm;
@@ -673,20 +713,41 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
    the gold patch is reachable through `git show <commit>:<file>`, `git log`,
    `git blame`, or any ref-bearing `git diff` — we **veto** every history-revealing
    git invocation in *all three phases* for *both* arms (`is_forbidden_command`,
-   `src/agent/phases.py`; allowed: bare `git diff`/`git status`/`git stash`/
-   `git add` for the submit protocol; pinned by `tests/test_anti_gaming.py`).
+   `src/agent/phases.py`; pinned by `tests/test_anti_gaming.py`). The veto is
+   **git-semantics-aware and false-positive-validated** against the archived
+   run-2 pilot: the original flags-only rule misread heredoc patch-file
+   *content* (`cat > fix.patch <<'EOF'` … `diff --git a/…`) as git invocations
+   (163/1,539 actions) and vetoed the agent reverting its *own* edits
+   (`git restore <file>`, 14 actions); the corrected veto strips heredoc
+   bodies/quoted spans exactly like the write detector and allows the
+   ref-incapable forms (`status`/`add`/`apply`/`stash`, `restore` without
+   `--source`, `checkout -- <path>`, `diff -- <path>`, `diff --no-index`, and
+   the literal `HEAD` — pinned at the base commit since `git commit` is itself
+   vetoed), while ref-ambiguous forms get an instructive veto naming the
+   allowed form. Direct reads of `.git`'s history-bearing internals
+   (`objects/`, `refs/`, `logs/`, `packed-refs`, `ORIG_HEAD`, `FETCH_HEAD`) are
+   vetoed on the raw command text (0/1,041 executed pilot actions referenced
+   `.git` at all — purely protective). Residual, documented: a forbidden
+   command smuggled inside a quoted program (`bash -c 'git log'`, python
+   `os.system`) is invisible to string-level scanning — same class as the
+   `python -c` write channel; the network block is the backstop for the
+   network half of that channel.
    (ii) The sweb eval images have **open internet by default** — we measured this
    (a `pip download six` succeeds in the unmodified image) — so the upstream PR/
    issue is fetchable; we run every agent container with **`--network none`**
    (`build_env_config`, verified: the same `pip download` then fails) and
    additionally veto network commands (`curl`/`wget`/`pip install`/`git clone`…)
-   as defense-in-depth. The control arm shares the identical scaffold, so any
-   residual leak channel is symmetric and cannot manufacture a treatment effect.
+   as defense-in-depth. The control arm shares the identical scaffold — including
+   the identical **code revision** (R2.3; campaign-enforced, see threat 11's
+   run-2 deviation) — so any residual leak channel is symmetric and cannot
+   manufacture a treatment effect.
    *Audited — the archived run-1 pilot:* a scan of all 2,184 logged actions found
    **zero** history-access or network-fetch attempts before these guards existed
    (the only non-read commands were three `pip install mpmath` that silently
    no-op'd, and two benign `git show HEAD:<file>` reads of the *base* commit, which
-   reveal nothing — both now vetoed regardless).
+   reveal nothing — both now vetoed regardless). *Audited — the archived run-2
+   pilot:* 22 network attempts (all `pip install mpmath`) and 11 ref-ambiguous
+   git forms in 1,528 actions; zero genuine history access.
    *Acknowledged — pretraining contamination (uncontrollable):* Qwen3-Coder-30B's
    training data is unknown to us, and these SymPy issues are old, public, and
    almost certainly present in any large code-pretraining corpus *together with

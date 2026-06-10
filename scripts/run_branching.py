@@ -108,7 +108,7 @@ def vanilla_samples_at_temperature(model_config: dict, branching_config: dict) -
     unchanged for any other arm, or a deep-copied config with the base-agent
     temperature set for 'none' (never mutating the caller's dict).
     """
-    if branching_config.get("diversity_method") != "none":
+    if cfg(branching_config, "diversity_method") != "none":
         return model_config
     mc = copy.deepcopy(model_config)
     mc.setdefault("model_kwargs", {})["temperature"] = \

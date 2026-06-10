@@ -202,6 +202,19 @@ def guardrails_ok(state: dict, args) -> tuple[bool, str]:
     free = disk_free_gb()
     if free < args.min_disk_gb:
         return False, f"disk floor hit ({free:.0f}GB < {args.min_disk_gb}GB)"
+    # Code-revision symmetry (R2.3): every step of every arm must run the
+    # SAME committed code as the campaign start. A mid-campaign commit,
+    # checkout, or hot edit of tracked files stops the campaign loudly.
+    pinned = state.get("code_revision")
+    head = _git_head()
+    if pinned and head and head != pinned:
+        return False, (f"code revision changed mid-campaign "
+                       f"(pinned {pinned[:12]}, HEAD {head[:12]}) — all arms "
+                       f"must be produced by one committed revision")
+    dirty = _tracked_modifications()
+    if dirty:
+        return False, (f"tracked files modified mid-campaign — arms would run "
+                       f"divergent code:\n{dirty[:500]}")
     return True, ""
 
 
@@ -211,9 +224,13 @@ def load_state(resume: bool) -> dict:
             state = json.load(f)
         state.setdefault("completed_specs", [])
         state.setdefault("phase_log", [])
+        # Pre-pinning state files inherit the pin at resume time (logged); a
+        # state that HAS a pin keeps it — guardrails_ok compares against HEAD.
+        state.setdefault("code_revision", _git_head())
         return state
     return {"started_ts": time.time(),
             "started": datetime.now().isoformat(timespec="seconds"),
+            "code_revision": _git_head(),
             "completed_specs": [], "phase_log": []}
 
 
@@ -366,6 +383,38 @@ def _tree_fingerprint() -> str:
                              capture_output=True, text=True, encoding="utf-8",
                              errors="replace", timeout=60)
         return out.stdout or ""
+    except Exception:
+        return ""
+
+
+def _git_head() -> str:
+    """Current commit SHA (empty string if git unavailable)."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT,
+                             capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _tracked_modifications() -> str:
+    """Porcelain limited to TRACKED files (-uno): modifications/deletions only.
+
+    A running campaign legitimately creates untracked results files, but no
+    step ever modifies a tracked file — so this must stay empty for the whole
+    campaign. Combined with the HEAD pin it enforces code-revision symmetry:
+    every arm of every cell is produced by the same committed code (R2.3).
+    The need is measured, not hypothetical: Phase A run-2's treatment ran at
+    07:13 and the anti-gaming guard set was committed at 09:52 the same
+    morning — the matched-k control would have run under vetoes (and
+    `--network none`) the treatment never faced (209/1,539 treatment actions
+    would have been vetoed under the original guard; run archived).
+    """
+    try:
+        out = subprocess.run(["git", "status", "--porcelain", "-uno"],
+                             cwd=PROJECT_ROOT, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=60)
+        return (out.stdout or "").strip()
     except Exception:
         return ""
 
@@ -665,9 +714,18 @@ def main() -> None:
         print("Pass --go to run.")
         return
 
+    # Refuse to start on modified tracked files: the campaign's provenance is
+    # its pinned commit; uncommitted code would make the pin a lie.
+    dirty = _tracked_modifications()
+    if dirty:
+        raise SystemExit(
+            "refusing to start: tracked files are modified (commit or stash "
+            f"first so the run is attributable to one revision):\n{dirty}"
+        )
+
     log(f"CAMPAIGN START (resume={args.resume}) state={STATE_PATH}")
     log(f"guardrails: max_hours={args.max_hours} min_disk_gb={args.min_disk_gb} "
-        f"max_phases={args.max_phases}")
+        f"max_phases={args.max_phases} code_revision={state.get('code_revision','')[:12]}")
 
     # Phase A (confirmatory) — always first, exactly once.
     if PHASE_A_KEY not in state["completed_specs"]:

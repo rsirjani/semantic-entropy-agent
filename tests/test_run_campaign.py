@@ -11,6 +11,16 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 import run_campaign as rc
+
+# Hermetic git state: these tests must not depend on the live repository's
+# HEAD or dirtiness (the revision-symmetry guard reads real git otherwise).
+# Tests that exercise the guard override these stubs locally.
+import pytest as _pytest
+
+@_pytest.fixture(autouse=True)
+def _hermetic_git(monkeypatch):
+    monkeypatch.setattr(rc, "_git_head", lambda: "test0000")
+    monkeypatch.setattr(rc, "_tracked_modifications", lambda: "")
 from eval_all_trajectories import propagate_duplicate_results
 
 
@@ -554,3 +564,40 @@ def test_stale_decision_file_never_read_as_fresh(monkeypatch, tmp_path):
     assert choice is None and "no decision file" in why
     assert not stale.exists()                      # archived, not consumed
     assert (stale.parent / "decision_01.json.superseded").exists()
+
+
+def test_guardrails_enforce_code_revision_symmetry(monkeypatch, tmp_path):
+    """R2.3 code-revision symmetry: a mid-campaign commit/checkout (HEAD moved)
+    or a hot edit of tracked files must stop the campaign before the next
+    step. Measured need: Phase A run-2's treatment ran at a revision two
+    guard-commits older than the control would have used (archived)."""
+    class A:
+        max_hours = 48.0
+        min_disk_gb = 0.0
+    monkeypatch.setattr(rc, "disk_free_gb", lambda path=None: 1000.0)
+    monkeypatch.setattr(rc.os.path, "exists", lambda p: False)
+
+    state = {"started_ts": time.time(), "code_revision": "aaaa1111"}
+
+    # Same revision, clean tracked tree -> ok
+    monkeypatch.setattr(rc, "_git_head", lambda: "aaaa1111")
+    monkeypatch.setattr(rc, "_tracked_modifications", lambda: "")
+    ok, _ = rc.guardrails_ok(state, A())
+    assert ok
+
+    # HEAD moved -> stop
+    monkeypatch.setattr(rc, "_git_head", lambda: "bbbb2222")
+    ok, why = rc.guardrails_ok(state, A())
+    assert not ok and "revision" in why
+
+    # Hot edit of a tracked file -> stop
+    monkeypatch.setattr(rc, "_git_head", lambda: "aaaa1111")
+    monkeypatch.setattr(rc, "_tracked_modifications", lambda: " M src/agent/phases.py")
+    ok, why = rc.guardrails_ok(state, A())
+    assert not ok and "tracked files modified" in why
+
+
+def test_fresh_state_pins_code_revision(monkeypatch):
+    monkeypatch.setattr(rc, "_git_head", lambda: "cafe0001")
+    state = rc.load_state(resume=False)
+    assert state["code_revision"] == "cafe0001"

@@ -85,12 +85,23 @@ PHASE_ALLOWED_COMMANDS = {
 # this command veto is defense-in-depth and the only guard for the git vector
 # (the .git history is legitimately present for the harness's own diffing).
 #
-# Git subcommands that never reveal history beyond the working tree. They are
-# allowed ONLY with flag arguments (no positional ref/path), because a ref turns
-# a safe subcommand into a history peek (`git diff HEAD~5`, `git diff master`).
-# The submit protocol only ever runs a bare `git diff` (+ redirect), so this
-# strictness costs nothing legitimate.
-_GIT_SAFE_SUBCMDS = {"diff", "status", "stash", "add", "apply"}
+# Git subcommand rules, by what a positional argument can MEAN to git
+# (measured against the archived run-2 pilot: a flags-only-for-everything rule
+# vetoed `git restore <file>` / `git checkout <file>` — the agent reverting its
+# OWN edits, 14 occurrences — and `git diff <path>` pathspec forms, 6):
+#
+# - PATH-ONLY subcommands: a positional can never name a ref, so they cannot
+#   reveal history — allowed with any args. `status`/`add` take pathspecs,
+#   `apply` takes local patch files, `stash` words (pop/push/list) act on the
+#   agent's own stash. `restore` restores from the index/HEAD *unless*
+#   `--source=<ref>` is given (the one history surface — checked explicitly).
+# - REF-AMBIGUOUS subcommands: a positional may be a ref (`git diff HEAD~5`,
+#   `git checkout master`), so positionals are allowed only AFTER `--` (the
+#   unambiguous pathspec form: `git diff -- f.py`, `git checkout -- f.py`).
+#   The veto reason teaches the allowed form so the agent can self-correct.
+# - Everything else (log/show/blame/reflog/rev-list/cat-file/...): forbidden.
+_GIT_PATH_ONLY_SUBCMDS = {"status", "add", "apply", "stash", "restore"}
+_GIT_REF_AMBIGUOUS_SUBCMDS = {"diff", "checkout"}
 _GIT_TOKEN_RE = re.compile(r"\bgit\b\s+(.*)", re.I | re.S)
 # Network fetchers (belt-and-suspenders behind --network none).
 _NETWORK_RE = re.compile(
@@ -99,42 +110,88 @@ _NETWORK_RE = re.compile(
     r"git\s+(?:clone|fetch|pull|remote))\b",
     re.I,
 )
+# Direct reads of .git's HISTORY-BEARING internals bypass the git-CLI veto:
+# refs/packed-refs name the post-fix commits, logs/ (reflog) records them, and
+# objects/ holds the gold patch's blobs (zlib, trivially inflated via
+# `python -c`). Deliberately NOT a blanket `.git` match — `find … -not -path
+# './.git/*'` is a legitimate exclusion idiom and must stay allowed. Measured:
+# 0 of 1,041 executed pilot actions referenced `.git` at all, so this veto is
+# purely protective.
+_GIT_INTERNALS_RE = re.compile(
+    r"\.git/(objects|refs|logs|packed-refs|info/refs|ORIG_HEAD|FETCH_HEAD)",
+    re.I,
+)
 
 
-def _git_segment_forbidden(seg: str) -> bool:
-    """True if a segment invokes git in a history-revealing way."""
+def _git_segment_forbidden(seg: str) -> tuple[bool, str]:
+    """(forbidden, detail) for a segment that invokes git.
+
+    `-c key=val` option pairs after `git` are consumed before the subcommand
+    is read, so `git -c diff.renames=false diff` is judged as `diff`.
+    """
     m = _GIT_TOKEN_RE.search(seg)
     if not m:
-        return False
+        return False, ""
     # Tokens after `git`, dropping redirect targets (`> file`, `>> file`).
     rest = re.sub(r"\d?>>?\s*\S+", " ", m.group(1)).split()
+    while len(rest) >= 2 and rest[0] == "-c":
+        rest = rest[2:]
     if not rest:
-        return True  # bare `git` — disallow (no legitimate use here)
+        return True, "bare git invocation"
     sub = rest[0].lower()
-    if sub not in _GIT_SAFE_SUBCMDS:
-        return True  # log / show / blame / reflog / rev-list / cat-file / ...
-    # Safe subcommand: forbid if it carries any POSITIONAL arg (a ref or path).
-    # Everything after `--` is a pathspec (safe); before it, only flags allowed.
-    for tok in rest[1:]:
-        if tok == "--":
-            break
-        if not tok.startswith("-"):
-            return True  # e.g. `git diff HEAD~5`, `git diff master file.py`
-    return False
+    args = rest[1:]
+    if sub in _GIT_PATH_ONLY_SUBCMDS:
+        if sub == "restore" and any(t.startswith("--source") for t in args):
+            return True, "git restore --source can read other revisions"
+        return False, ""
+    if sub in _GIT_REF_AMBIGUOUS_SUBCMDS:
+        # `git diff --no-index` compares filesystem paths only — no ref surface.
+        if sub == "diff" and "--no-index" in args:
+            return False, ""
+        # Positionals allowed only after `--` (unambiguous pathspec form), with
+        # one literal exception: `HEAD` is pinned at the base commit (`git
+        # commit` is vetoed, so it cannot move), and `git diff HEAD` / `git
+        # checkout HEAD -- <path>` reveal nothing beyond the working tree —
+        # both appeared as natural idioms in the archived run-2 pilot.
+        for tok in args:
+            if tok == "--":
+                return False, ""
+            if tok == "HEAD":
+                continue
+            if not tok.startswith("-"):
+                return True, (
+                    f"`git {sub} {tok}` is ref-ambiguous; "
+                    f"use `git {sub} -- <path>`"
+                )
+        return False, ""
+    return True, f"git {sub} can reveal repository history"
 
 
 def is_forbidden_command(command: str) -> tuple[bool, str]:
     """Solution-leak veto applied in EVERY phase. Returns (forbidden, reason).
 
-    Checks each top-level `&&`/`;`/`|` segment so a forbidden command cannot
-    hide behind an allowed prefix (`cat x && git show <sha>`).
+    Inspects every top-level command segment with HEREDOC BODIES STRIPPED and
+    QUOTED SPANS BLANKED (same `_command_segments` treatment as the write
+    detector) — measured on the archived run-2 pilot, the raw-text version
+    false-positived on 163 of 1,539 actions because heredoc patch-file content
+    (`cat > fix.patch <<'EOF'` followed by `diff --git a/...`) reads as a git
+    invocation. Pipe stages within a segment are still caught because the git/
+    network regexes search anywhere in the segment. The `.git`-internals check
+    runs on the RAW text (quoted paths like `open('.git/refs/...')` must
+    match). Residual (documented, accepted): a forbidden command smuggled
+    inside a quoted program (`bash -c 'git log'`, python os.system) is
+    invisible after blanking — the same string-level limit as the write
+    detector's `python -c` channel; the container network block and the
+    .git-internals raw scan are the backstops.
     """
-    for seg in re.split(r"&&|\|\||;|\|", command):
-        seg = seg.strip()
-        if not seg:
-            continue
-        if _git_segment_forbidden(seg):
-            return True, "git history access (SWE-bench gold-patch leak vector)"
+    if _GIT_INTERNALS_RE.search(command):
+        return True, "raw .git internals access (git-history leak vector)"
+    for seg in _command_segments(command):
+        forbidden, detail = _git_segment_forbidden(seg)
+        if forbidden:
+            return True, (
+                f"git history access (SWE-bench gold-patch leak vector): {detail}"
+            )
         if _NETWORK_RE.search(seg):
             return True, "network access (upstream-fix leak vector)"
     return False, ""

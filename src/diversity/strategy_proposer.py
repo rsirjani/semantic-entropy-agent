@@ -131,8 +131,16 @@ class StrategyProposer:
                 content = msg.get("content", "")[:500]
                 if content.strip():
                     steps.append(f"[Agent]: {content}")
-            elif msg.get("role") == "user" and "<output>" in msg.get("content", ""):
-                # Include command outputs — these contain the actual code
+            elif msg.get("role") == "user" and (
+                "<output>" in msg.get("content", "")
+                or "<output_head>" in msg.get("content", "")
+            ):
+                # Include command outputs — these contain the actual code.
+                # Long outputs are rendered by the observation template as
+                # <output_head>/<output_tail> instead of <output> (measured:
+                # 3 of 120 SEARCH-phase pilot observations); matching only
+                # <output> silently hid exactly those steps' code from the
+                # strategy proposer's report.
                 # Use a larger limit (1500 chars) to preserve real code snippets
                 if relevant_steps is not None and assistant_step not in relevant_steps:
                     continue

@@ -10,70 +10,99 @@ import time
 logger = logging.getLogger(__name__)
 
 
+class ContainerCloneError(RuntimeError):
+    """A fork's filesystem clone could not be completed faithfully.
+
+    Raised instead of silently degrading: fork-state consistency is
+    load-bearing for the SDLG arm (the fork's container must start from
+    exactly the parent's working tree, or the child trajectory's results are
+    attributed to the SDLG mechanism while actually running from a different
+    state). The caller (`PhasedOrchestrator._clone_for_sdlg`) catches any
+    exception and registers the draw as failed-at-creation (R7.2), which is
+    the honest accounting for an unclonable fork.
+    """
+
+
 def clone_container_state(
     source_container_id: str,
     target_container_id: str,
     workdir: str = "/testbed",
 ) -> None:
-    """Clone modified files from source container to target container via docker cp.
+    """Replicate the source container's working-tree state onto the target.
 
-    Steps:
-    1. Get list of modified/untracked files from source via git
-    2. Copy each modified file from source to target
+    Strict, deletion-aware contract (raises ContainerCloneError on ANY step
+    it cannot complete — never a partial/silent clone):
+
+    1. List tracked changes with status letters (`git diff --name-status -z`,
+       rename detection disabled so renames appear as D + A) and untracked
+       files (`git ls-files --others --exclude-standard -z`).
+    2. DELETED files are deleted in the target (docker cp cannot copy a file
+       that no longer exists — the old implementation warned and left the
+       file alive in the fork, silently desyncing its state).
+    3. Modified/added/untracked files are copied via docker cp, with every
+       copy and mkdir checked.
+
+    NUL-separated listings (`-z`) keep filenames with spaces intact. Note the
+    common case is a no-op: SDLG forks at the FIRST detected write, before it
+    executes, so the parent tree is typically pristine; the strict contract
+    matters for the VERIFY-phase SDLG fallback and undetectable writes
+    (`python -c "open(...,'w')"`), where the parent tree can be dirty.
     """
-    # Get modified files (tracked changes + untracked files)
-    result = subprocess.run(
-        ["docker", "exec", "-w", workdir, source_container_id,
-         "bash", "-c",
-         "git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        logger.warning(f"Failed to get modified files: {result.stderr}")
-        return
+    def _run(cmd: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            raise ContainerCloneError(
+                f"{' '.join(cmd[:4])}... failed (rc={result.returncode}): "
+                f"{(result.stderr or result.stdout or '').strip()[:500]}"
+            )
+        return result
 
-    modified_files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
-    if not modified_files:
+    tracked = _run([
+        "docker", "exec", "-w", workdir, source_container_id,
+        "git", "-c", "diff.renames=false", "diff", "--name-status", "-z", "HEAD",
+    ])
+    untracked = _run([
+        "docker", "exec", "-w", workdir, source_container_id,
+        "git", "ls-files", "--others", "--exclude-standard", "-z",
+    ])
+
+    deleted: list[str] = []
+    to_copy: list[str] = []
+    tokens = [t for t in tracked.stdout.split("\0") if t]
+    for status, path in zip(tokens[::2], tokens[1::2]):
+        if status.startswith("D"):
+            deleted.append(path)
+        else:  # M / A / T (renames disabled -> no R/C entries)
+            to_copy.append(path)
+    to_copy.extend(t for t in untracked.stdout.split("\0") if t)
+
+    if not deleted and not to_copy:
         logger.info("No modified files to clone")
         return
 
-    logger.info(f"Cloning {len(modified_files)} modified files to new container")
+    logger.info(
+        f"Cloning container state: {len(to_copy)} modified/untracked file(s), "
+        f"{len(deleted)} deletion(s)"
+    )
+
+    for filepath in deleted:
+        _run(["docker", "exec", "-w", workdir, target_container_id,
+              "rm", "-f", f"{workdir}/{filepath}"], timeout=10)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        for filepath in modified_files:
+        for i, filepath in enumerate(to_copy):
             src_path = f"{workdir}/{filepath}"
-            local_path = os.path.join(tmpdir, filepath)
-
-            # Create local directory structure
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-            # Copy from source container to local
-            try:
-                subprocess.run(
-                    ["docker", "cp", f"{source_container_id}:{src_path}", local_path],
-                    capture_output=True, text=True, timeout=30, check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Failed to copy {filepath} from source: {e.stderr}")
-                continue
-
-            # Ensure target directory exists
+            # Flat local name (index prefix) sidesteps Windows path-separator
+            # and collision issues; the container path keeps the real layout.
+            local_path = os.path.join(tmpdir, f"{i}_{os.path.basename(filepath)}")
+            _run(["docker", "cp", f"{source_container_id}:{src_path}", local_path])
             target_dir = os.path.dirname(src_path)
-            subprocess.run(
-                ["docker", "exec", target_container_id, "mkdir", "-p", target_dir],
-                capture_output=True, timeout=10,
-            )
+            if target_dir:
+                _run(["docker", "exec", target_container_id,
+                      "mkdir", "-p", target_dir], timeout=10)
+            _run(["docker", "cp", local_path, f"{target_container_id}:{src_path}"])
 
-            # Copy from local to target container
-            try:
-                subprocess.run(
-                    ["docker", "cp", local_path, f"{target_container_id}:{src_path}"],
-                    capture_output=True, text=True, timeout=30, check=True,
-                )
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"Failed to copy {filepath} to target: {e.stderr}")
-
-    logger.info(f"Cloned {len(modified_files)} files successfully")
+    logger.info(f"Cloned {len(to_copy)} file(s) (+{len(deleted)} deletion(s)) successfully")
 
 
 class SWEBenchContainer:
