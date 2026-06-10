@@ -442,8 +442,22 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 
 ## 8. Internal correctness (no latent bugs that corrupt evidence)  `[BLOCKER]`
 
-- **R8.1** Write-command / branch-point detection is correct (no `echo`/submit/
-  stderr false positives) so SDLG and read-budget logic fire at the right step.
+- **R8.1** Write-command / branch-point detection is correct so SDLG and
+  read-budget logic fire at the right step: no false positives from `echo`/
+  submit/stderr redirects, from comparison operators inside quoted programs
+  (`awk 'NR>=350 …'` — measured on pilot logs), or from heredoc body content;
+  and no false negatives for writes in non-final `&&`/`;`/newline segments
+  (`sed -i … && pytest`) — detection inspects every top-level command segment
+  with quoted spans and heredoc bodies excluded. The SEARCH phase must
+  **enforce** its read-only boundary with this same detector (a prefix
+  allowlist alone admits `echo … > file` under the allowed `echo` prefix):
+  fork-state consistency is load-bearing because strategy forks replay search
+  *messages* into fresh containers rather than cloning the searched
+  container's *filesystem*, so a SEARCH-phase write would silently desync the
+  root trajectory's starting state from every fork's. Submission is
+  VERIFY-only and must be decided before any prefix match. Phase boundaries
+  that are NOT enforced (PATCH/VERIFY allowlists are prompt-level guidance)
+  must be documented as such, not implied to be checked.
 - **R8.2** Config defaults are centralized and consistent across call sites.
 - **R8.3** Captured fallback patches are source-only (comparable to the curated
   submit path), not raw diffs that include test edits.

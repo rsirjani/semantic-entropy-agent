@@ -130,7 +130,16 @@ class NLIModel:
             i for i, t in enumerate(tokens) if t == self.tokenizer.sep_token
         ]
         if len(sep_positions) < 2:
-            return {"tokens": [], "attributions": torch.tensor([])}
+            # Degenerate input (e.g. empty/whitespace text). Return the FULL
+            # schema: callers index "gradients"/"embeddings" directly (the
+            # /sdlg_scores endpoint did, and KeyError'd into an HTTP 500 here).
+            return {
+                "tokens": [], "token_ids": [],
+                "attributions": torch.tensor([]),
+                "gradients": torch.tensor([]),
+                "embeddings": torch.tensor([]),
+                "word_starts": [],
+            }
         # Hypothesis starts after the consecutive SEPs, ends before the last SEP
         # Find the first non-SEP token after the first SEP
         hyp_start = sep_positions[0] + 1

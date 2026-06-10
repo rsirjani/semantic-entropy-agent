@@ -114,6 +114,24 @@ treatment arm is therefore attributable to that arm's named generator; an
 instance where the generator produces nothing stays a single greedy trajectory,
 which the realized-N reporting flags.
 
+**Mechanism integrity at the run-mechanics layer (iteration-14 guards).** Two
+silent mechanism-dilution paths were found in the pilot artifacts and closed
+before the confirmatory runs: (i) *strategy-prompt pinning* — context
+truncation (first-4 + last-40 messages) silently dropped the assigned-strategy
+prompt from 3 of the pilot's long trajectories, letting exactly the hard
+instances drift back to the model's mode; phase prompts are now pinned across
+truncation. (ii) *SEARCH-phase write enforcement* — strategy forks are fresh
+containers that replay the search *messages*, not clones of the searched
+container's *filesystem*, so the SEARCH phase must actually be read-only for
+all forks to start from the same state; the prefix allowlist alone admitted
+`echo … > file` (0 occurrences in 2,184 pilot actions, now blocked rather than
+assumed away). The write detector itself was hardened with the same
+measurement: comparison operators inside quoted awk/python programs no longer
+read as writes (2 pilot false positives — in the SDLG arm a false positive
+before the first real write would corrupt that instance's branch point), and
+writes hidden in non-final `&&` segments no longer escape detection. Both
+arms run the identical phase machinery, so these guards are symmetric.
+
 ### 2.2 Matched budget & temperature
 
 One `sample_temperature` knob (`configs/branching.yaml`) drives **both** the proposer

@@ -11,6 +11,31 @@ Phase 2 — PATCH: Write access. Agent implements a fix. SDLG operates here
 
 Phase 3 — VERIFY: Read-only again. Agent runs tests and reviews changes.
     No branching — just validate the patch.
+
+ENFORCEMENT REALITY (honest contract — what the orchestrator actually checks):
+
+- SEARCH: enforced. `PhasedOrchestrator._step_search` blocks any command that
+  fails `is_command_allowed(cmd, Phase.SEARCH)`, which combines the read-only
+  prefix allowlist with an `is_write_command` veto. The write veto is
+  LOAD-BEARING, not cosmetic: strategy forks are fresh containers that replay
+  the search MESSAGES, not clones of the searched container's FILESYSTEM
+  (`_create_lazy_trajectory`), so a file written during SEARCH would exist in
+  t0's container but not in any fork's — silently desynchronizing the
+  branches' starting states. Residual gap (documented, undetectable from the
+  command string): `python -c "open('f','w')..."` can still write.
+- PATCH / VERIFY: prompt-level guidance only. `_step_patch` / `_step_verify`
+  never call `is_command_allowed`; the PATCH/VERIFY entries in
+  `PHASE_ALLOWED_COMMANDS` describe the intended envelope and feed the phase
+  prompts, but any command the agent emits in those phases executes. VERIFY
+  cannot be made strictly read-only anyway — the submit protocol requires
+  `git diff > patch.txt`. A VERIFY-phase edit is still the agent's own work
+  and lands in its captured patch; this is symmetric across arms.
+- Phase transitions: SEARCH→PATCH happens ONLY via `should_end_search`
+  (relevance saturation or the hard step cap). The SEARCH_PROMPT tells the
+  agent that declaring `STRATEGY:` transitions it — operatively, declaring a
+  strategy makes the agent stop searching, its steps score low relevance, and
+  saturation fires; the prompt sentence is a behavioral nudge, not a wired
+  trigger. PATCH→VERIFY uses `detect_phase_transition`.
 """
 
 import re
@@ -50,11 +75,29 @@ PHASE_ALLOWED_COMMANDS = {
 def is_command_allowed(command: str, phase: Phase) -> bool:
     """Check if a bash command is allowed in the given phase.
 
-    Uses prefix matching — if any allowed prefix matches the start
-    of the command (after stripping cd prefixes), it's allowed.
+    Order matters (each rule closes a bypass of the next):
+
+    1. Submission is decided FIRST and only allowed in VERIFY. (Checked after
+       the prefix loop, it was dead code: the submit command starts with
+       `echo`/ends with `cat patch.txt`, so a read prefix matched first and a
+       SEARCH-phase submission sailed through.)
+    2. SEARCH additionally vetoes anything `is_write_command` flags. (The
+       prefix allowlist alone lets `echo fix > file.py` or `cat <<EOF > f.py`
+       through, because `echo`/`cat` are allowed read prefixes — and SEARCH
+       read-only-ness is load-bearing for fork-state consistency; see the
+       module docstring.)
+    3. Otherwise: prefix allowlist on the last `&&` segment (the actual
+       action after `cd ... &&` chains).
+
+    Only SEARCH is enforced by the orchestrator; see the module docstring.
     """
-    # Strip common prefixes like "cd /testbed && "
     cmd = command.strip()
+    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in cmd:
+        return phase == Phase.VERIFY
+    if phase == Phase.SEARCH and is_write_command(cmd):
+        return False
+
+    # Strip common prefixes like "cd /testbed && "
     if "&&" in cmd:
         # Check the last command in the chain (the actual action)
         cmd = cmd.split("&&")[-1].strip()
@@ -63,10 +106,6 @@ def is_command_allowed(command: str, phase: Phase) -> bool:
     for prefix in allowed:
         if cmd.startswith(prefix):
             return True
-
-    # Special case: submission is only allowed in VERIFY phase
-    if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in command:
-        return phase == Phase.VERIFY
 
     return False
 
@@ -80,38 +119,94 @@ _WRITE_PREFIXES = ("sed -i", "tee ", "patch ", "dd ", "truncate ", "mv ", "cp ")
 #   - the null sink:         > /dev/null
 _REDIRECT_RE = re.compile(r"(?<![0-9&])>>?\s*(?!&)(?!/dev/null\b)\S")
 
+# Start of a heredoc on a command line: `<<MARKER`, `<<'MARKER'`, `<<-"MARKER"`.
+_HEREDOC_START_RE = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
+
+# A single- or double-quoted span. The char classes match newlines too, so a
+# multi-line quoted program (python -c '...') is blanked as one span.
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """Drop heredoc BODY lines (between `<<MARKER` and the closing MARKER line).
+
+    The command line that opens the heredoc is kept — its redirect
+    (`cat <<'EOF' > file.py`) is the write signal. The body is file CONTENT,
+    not commands; leaving it in produces false redirect matches on code like
+    `if x > 0:`.
+    """
+    out: list[str] = []
+    marker: str | None = None
+    for line in command.split("\n"):
+        if marker is not None:
+            if line.strip() == marker:
+                marker = None
+            continue
+        m = _HEREDOC_START_RE.search(line)
+        if m:
+            marker = m.group(2)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _command_segments(command: str) -> list[str]:
+    """Top-level command segments, with quoted spans and heredoc bodies blanked.
+
+    Heredoc bodies are dropped first, then quoted spans are replaced by ''
+    BEFORE splitting, so a `&&` / `;` inside an awk/python program does not
+    create a phantom segment and a `>=` inside quotes cannot read as a
+    redirect. Splits on `&&`, `;`, and newlines — every segment is a command
+    that executes, so each must be inspected (a write does not stop being a
+    write because `&& pytest` follows it).
+    """
+    cleaned = _QUOTED_RE.sub("''", _strip_heredoc_bodies(command))
+    return [seg.strip() for seg in re.split(r"&&|;|\n", cleaned) if seg.strip()]
+
 
 def is_write_command(command: str) -> bool:
     """Check if a command modifies a file on disk (used to detect patch actions).
 
     Detects in-place editors (sed -i, tee, patch), file movers (mv/cp/dd/
-    truncate), and stdout redirects (`>` / `>>`) to a real file.
+    truncate), and stdout redirects (`>` / `>>`) to a real file — in ANY
+    top-level segment of the command (`&&` / `;` / newline chains), with
+    quoted spans and heredoc bodies excluded from inspection.
 
-    Deliberately NOT classified as writes (these were false positives in the
-    earlier prefix-only heuristic and could mis-trigger SDLG):
+    Deliberately NOT classified as writes (false-positive classes that could
+    mis-trigger SDLG at a non-write step — the first two from the original
+    prefix-only heuristic, the last two measured on the pilot logs):
       - the submission command (echoes the sentinel, then cats patch.txt),
       - bare `echo` / `printf` with no redirect,
-      - stderr-only redirects (`2>`, `&>`, `2>&1`) and fd dups (`>&1`),
-      - redirects to /dev/null.
+      - stderr-only redirects (`2>`, `&>`, `2>&1`), fd dups (`>&1`),
+        and /dev/null sinks,
+      - comparison operators inside quoted programs, e.g.
+        `awk 'NR>=350 {print}' file.py` (2 occurrences in 2184 pilot
+        actions were misread as writes by the unquoted-regex version),
+      - heredoc BODY content (`python - <<'EOF' ... if x > 0 ... EOF`).
 
-    Known limitation: a redirect of program output to a scratch file
-    (e.g. `python repro.py > out.txt`) is treated as a write. Distinguishing a
-    source edit from a scratch-file write is not reliable from the command
-    string alone; callers that need precision should diff the working tree.
+    And the converse false-negative class is closed: a real write hidden in a
+    non-final segment (`sed -i ... && python -m pytest`,
+    `git diff > patch.txt && cat patch.txt`) is detected — the last-segment-
+    only version missed it, which in the SDLG arm would skip the genuine
+    branch point.
+
+    Known limitations (documented, accepted): a redirect of program output to
+    a scratch file (`python repro.py > out.txt`) is treated as a write, and a
+    programmatic write (`python -c "open('f','w')..."`) is undetectable from
+    the command string. Callers that need precision should diff the tree.
     """
     cmd = command.strip()
     # The submission command is `echo <sentinel> && cat patch.txt` — not a write.
     if "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" in cmd:
         return False
-    # Use the final command in a "cd ... && <action>" chain (the actual action).
-    if "&&" in cmd:
-        cmd = cmd.split("&&")[-1].strip()
 
-    for prefix in _WRITE_PREFIXES:
-        if cmd.startswith(prefix):
+    for seg in _command_segments(cmd):
+        for prefix in _WRITE_PREFIXES:
+            if seg.startswith(prefix):
+                return True
+        if _REDIRECT_RE.search(seg):
             return True
 
-    return bool(_REDIRECT_RE.search(cmd))
+    return False
 
 
 # Phase-specific system prompts (appended to the base system prompt)
@@ -222,30 +317,22 @@ def should_end_search(
 
 
 def detect_phase_transition(thought: str, action: str, current_phase: Phase) -> Phase | None:
-    """Detect if the agent is signaling a phase transition.
+    """Detect if the agent is signaling a PATCH→VERIFY transition.
+
+    Live contract: the orchestrator calls this only with
+    `current_phase=Phase.PATCH` (`_step_patch`). SEARCH→PATCH is decided by
+    `should_end_search` (relevance saturation / step cap), NOT here — an
+    earlier version carried a dead SEARCH branch keyed on "STRATEGY:"
+    phrases, which invited the false belief that declaring a strategy ends
+    the search phase (it ends it only indirectly, via low-relevance
+    saturation; see the module docstring). VERIFY has no outgoing
+    transition — it ends with submission.
 
     Returns the new phase, or None if no transition.
     """
     thought_lower = thought.lower()
 
-    if current_phase == Phase.SEARCH:
-        # Check if agent is declaring a strategy
-        if "STRATEGY:" in thought or "strategy:" in thought_lower:
-            return Phase.PATCH
-        # Also detect implicit strategy formation
-        if any(phrase in thought_lower for phrase in [
-            "i think the fix",
-            "the fix should",
-            "let me fix",
-            "let me modify",
-            "i'll change",
-            "i need to change",
-            "the solution is",
-            "to fix this",
-        ]):
-            return Phase.PATCH
-
-    elif current_phase == Phase.PATCH:
+    if current_phase == Phase.PATCH:
         # Check if agent is done patching
         if "DONE:" in thought or "done:" in thought_lower:
             return Phase.VERIFY
@@ -258,9 +345,5 @@ def detect_phase_transition(thought: str, action: str, current_phase: Phase) -> 
             "git diff",
         ]) and is_write_command(action) is False:
             return Phase.VERIFY
-
-    elif current_phase == Phase.VERIFY:
-        # No transition from verify — it ends with submission
-        pass
 
     return None

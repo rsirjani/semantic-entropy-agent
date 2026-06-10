@@ -1410,7 +1410,16 @@ class PhasedOrchestrator:
         """Truncate old observation messages to prevent context window overflow.
 
         Keeps the first 4 messages (system + instance prompt + phase prompts)
-        and the last max_messages/2 messages. Drops observations from the middle.
+        and the last max_messages/2 messages. Drops observations from the
+        middle — EXCEPT phase prompts ("## Current Phase:" user messages),
+        which are pinned. The assigned-strategy prompt
+        (PATCH_PROMPT_WITH_STRATEGY) sits in the middle (after the replayed
+        search messages) and IS the treatment arm's mechanism: dropping it
+        lets a long branch drift back to the model's mode, silently diluting
+        strategy-level diversity on exactly the hard instances (observed on 3
+        pilot trajectories that ran past the truncation threshold and lost
+        the prompt). The VERIFY prompt carries the submit protocol and is
+        pinned for the same reason. Pinning costs ≤2 messages.
         """
         messages = traj.agent.messages
         if len(messages) <= max_messages:
@@ -1419,8 +1428,14 @@ class PhasedOrchestrator:
         keep_start = 4  # System prompt, instance, phase prompt, etc.
         keep_end = max_messages // 2
 
-        # Keep first few + last half, drop middle observations
-        truncated = messages[:keep_start] + messages[-keep_end:]
+        # Keep first few + pinned phase/strategy prompts + last half.
+        middle = messages[keep_start:-keep_end]
+        pinned = [
+            m for m in middle
+            if isinstance(m.get("content"), str)
+            and m["content"].lstrip().startswith("## Current Phase:")
+        ]
+        truncated = messages[:keep_start] + pinned + messages[-keep_end:]
 
         n_dropped = len(messages) - len(truncated)
         self.tracer.log(

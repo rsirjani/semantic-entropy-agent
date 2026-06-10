@@ -29,6 +29,102 @@ def test_is_write_command_detects_real_writes():
     assert is_write_command("patch -p1 < fix.diff") is True
 
 
+def test_is_write_command_quoted_comparison_not_a_write():
+    """Pilot-measured false-positive class (2/2184 actions): a `>=` inside a
+    quoted awk/python program is a comparison, not a redirect. In the SDLG arm
+    a false positive BEFORE the first real write corrupts that instance's
+    branch point (SDLG fires once, at a view step)."""
+    assert is_write_command("awk 'NR>=350 {print NR \": \" $0}' /testbed/sympy/printing/pycode.py | tail -30") is False
+    assert is_write_command("cd /testbed && awk 'NR>=495 && NR<=520' /testbed/sympy/core/function.py") is False
+    assert is_write_command("awk '/^    >>> kernS/,/^    >>>/ {print NR}' sympy/core/sympify.py") is False
+    assert is_write_command("python -c \"print(5 >= 3)\"") is False
+
+
+def test_is_write_command_chained_write_in_nonfinal_segment():
+    """False-negative class of the last-segment-only version: a real write does
+    not stop being a write because `&& pytest` follows it."""
+    assert is_write_command("sed -i 's/a/b/' f.py && python -m pytest sympy/core/tests") is True
+    assert is_write_command("cd /testbed && sed -i 's/a/b/' f.py && python -m pytest") is True
+    assert is_write_command("git diff > patch.txt && cat patch.txt") is True
+    assert is_write_command("echo fix > /testbed/f.py; ls") is True
+
+
+def test_is_write_command_heredoc_body_not_inspected():
+    """Heredoc BODY lines are file content, not commands — `if x > 0:` inside a
+    python heredoc must not read as a redirect. The opening line's redirect
+    still counts."""
+    assert is_write_command("python - <<'EOF'\nif x > 0:\n    print(x)\nEOF") is False
+    assert is_write_command("cat <<'EOF' > /testbed/f.py\nif x > 0:\n    pass\nEOF") is True
+
+
+def test_search_phase_blocks_writes_and_submission():
+    """SEARCH read-only-ness is load-bearing: strategy forks are FRESH
+    containers replaying search messages, not filesystem clones, so a SEARCH
+    write would desync t0's container state from every fork's. The prefix
+    allowlist alone let `echo ... > file` (allowed prefix `echo`) and the
+    submit command (allowed prefix `cat` in the last segment) through."""
+    from src.agent.phases import Phase, is_command_allowed
+    # Reads stay allowed.
+    assert is_command_allowed("grep -rn foo sympy/", Phase.SEARCH) is True
+    assert is_command_allowed("cd /testbed && cat sympy/core/mul.py", Phase.SEARCH) is True
+    assert is_command_allowed("echo checking", Phase.SEARCH) is True
+    # Writes hiding behind allowed read prefixes are blocked.
+    assert is_command_allowed("echo 'fix' > /testbed/sympy/core/mul.py", Phase.SEARCH) is False
+    assert is_command_allowed("cat <<'EOF' > /testbed/repro.py\nx=1\nEOF", Phase.SEARCH) is False
+    assert is_command_allowed("sed -i 's/a/b/' f.py && cat f.py", Phase.SEARCH) is False
+    # Submission is VERIFY-only — in every phase, regardless of prefix matches.
+    submit = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat /testbed/patch.txt"
+    assert is_command_allowed(submit, Phase.SEARCH) is False
+    assert is_command_allowed(submit, Phase.PATCH) is False
+    assert is_command_allowed(submit, Phase.VERIFY) is True
+    # The VERIFY submit-prep redirect stays allowed (write veto is SEARCH-only).
+    assert is_command_allowed("cd /testbed && git diff -- sympy/core/mul.py > patch.txt", Phase.VERIFY) is True
+
+
+def test_truncate_context_pins_strategy_and_phase_prompts():
+    """Mechanism fidelity: 3 pilot trajectories ran past the 80-message
+    truncation threshold and silently LOST their assigned-strategy prompt
+    (first-4 + last-40 keeps neither). The strategy prompt IS the treatment
+    mechanism; truncation must pin '## Current Phase:' user messages."""
+    import types
+    from src.agent.phases import PATCH_PROMPT_WITH_STRATEGY, VERIFY_PROMPT
+    from src.agent.phased_orchestrator import PhasedOrchestrator
+
+    strategy_msg = {"role": "user",
+                    "content": PATCH_PROMPT_WITH_STRATEGY.format(strategy="Use a sentinel default")}
+    msgs = [{"role": "system", "content": "sys"},
+            {"role": "user", "content": "instance"},
+            {"role": "user", "content": "search prompt"},
+            {"role": "assistant", "content": "a0"}]
+    msgs += [{"role": "user", "content": f"obs {i}"} for i in range(8)]
+    msgs.append(strategy_msg)                                   # middle: would be dropped
+    msgs.append({"role": "user", "content": VERIFY_PROMPT})     # middle: would be dropped
+    msgs += [{"role": "assistant" if i % 2 else "user", "content": f"step {i}"}
+             for i in range(80)]
+    assert len(msgs) > 80
+
+    captured = {}
+    agent = types.SimpleNamespace(messages=msgs,
+                                  set_messages=lambda m: captured.update(out=m))
+    traj = types.SimpleNamespace(agent=agent, trajectory_id="t0_strategy_1", step=50)
+    stub = types.SimpleNamespace(tracer=types.SimpleNamespace(log=lambda *a, **k: None))
+
+    PhasedOrchestrator._truncate_context(stub, traj)
+    out = captured["out"]
+    assert len(out) < len(msgs)
+    contents = [m["content"] for m in out]
+    assert strategy_msg["content"] in contents          # pinned, not dropped
+    assert VERIFY_PROMPT in contents                    # pinned, not dropped
+    assert out[:4] == msgs[:4]                          # head preserved
+    assert out[-40:] == msgs[-40:]                      # tail preserved
+    # Idempotent under re-truncation: pinned prompts survive a second pass.
+    agent2 = types.SimpleNamespace(messages=out + [{"role": "user", "content": f"x{i}"} for i in range(60)],
+                                   set_messages=lambda m: captured.update(out2=m))
+    traj2 = types.SimpleNamespace(agent=agent2, trajectory_id="t0_strategy_1", step=90)
+    PhasedOrchestrator._truncate_context(stub, traj2)
+    assert strategy_msg["content"] in [m["content"] for m in captured["out2"]]
+
+
 def test_resolve_dataset_alias():
     assert resolve_dataset_name("lite") == "SWE-bench/SWE-bench_Lite"
     assert resolve_dataset_name("verified") == "SWE-bench/SWE-bench_Verified"
