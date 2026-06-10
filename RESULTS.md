@@ -241,6 +241,24 @@ These are deliberate, disclosed deviations — not bugs:
 All metrics are pure post-processing over the predictions/eval artifacts
 (`src/evaluation/metrics.py`, no GPU/NLI/Docker):
 
+- **Eval-record completeness (the metric inputs' contract).** The per-arm
+  `trajectory_eval_<iid>.json` files are produced by
+  `scripts/eval_all_trajectories.py`, which (i) writes into the **arm's own
+  results dir** (`--results-dir`), so evaluating the control can never
+  overwrite the treatment's eval files; (ii) emits **exactly one row per
+  genuine trajectory** — duplicate patches are evaluated once for compute but
+  every duplicate inherits its representative's outcome (identical patches
+  resolve identically; marked `deduped_from`), and **empty patches count as
+  `resolved: false` draws** without a Docker run. This is load-bearing for the
+  Chen estimator: its (n, c) must count what the arm actually *produced*. The
+  vanilla arm's duplicate patches ARE the mode-collapse signal under study —
+  an eval record that deduplicated them would deflate vanilla's k, shrink the
+  matched k\*, and silently subsample the treatment's coverage while the
+  vanilla arm kept plain any-pass. Re-runs are safe end-to-end: the eval
+  driver and the metric loaders both keep the **last** occurrence per
+  (instance, trajectory), and entropy/partition parsers read the **last**
+  `STRATEGY PROPOSAL` block of the append-mode decisions log.
+
 - **Coverage — `diverse-pass@k`** via the **unbiased Chen et al. (2021)** estimator on
   *both* arms at matched k. Framed honestly as an **oracle upper bound**, not
   deployable accuracy. **Matched k is enforced at metric time, not only at run
@@ -257,7 +275,22 @@ All metrics are pure post-processing over the predictions/eval artifacts
   `expected_distinct_at_k` (expected #distinct in a random k\*-subset — the same
   hypergeometric identity as Chen) because raw distinct counts rise mechanically with
   sample size; mean pairwise distance needs no correction (expected subset mean =
-  full mean, by pair-inclusion symmetry).
+  full mean, by pair-inclusion symmetry). **Two known properties of the H1 endpoint,
+  disclosed before the runs:** (i) *granularity* — the exact signature counts
+  lexical variants (e.g. a renamed variable) as distinct in BOTH arms; since the
+  whole-agent-sampling vanilla arm is, if anything, the noisier producer of trivial
+  variants, this inflates the *control's* distinct count more and biases H1 toward
+  the null (conservative for the diversity claim; the graded pairwise distance and
+  the roadmap behavioral metric complement it). (ii) *productivity confound* — an
+  empty patch lowers the rarefied distinct count exactly like a duplicate, so an H1
+  win could in principle reflect a patch-*production*-rate gap rather than
+  diversity; `compute_metrics.py` therefore reports each arm's
+  `nonempty_patch_fraction` and a **descriptive robustness row**
+  (`rarefied_distinct_gain_nonempty`: the same rarefied gain over non-empty patches
+  only, at k\*_ne = min non-empty count). If the confirmatory H1 rejects but the
+  non-empty-only row shows ≈0 gain alongside a large production-rate gap, the paper
+  reports the win as productivity, not mode-collapse escape. This row is fixed now,
+  pre-data, and does not alter the confirmatory endpoint.
 - **Selection-aware accuracy (R4.4) — implemented:** `selected-pass@1` under the
   **majority normalized-patch-signature selector** (self-consistency over final
   patches; ties → earliest seen; empty patches never win; all-empty counts as a
@@ -319,6 +352,12 @@ python scripts/run_branching.py --config configs/branching.yaml \
 # Matched-k vanilla control at the SAME temperature:
 python scripts/run_resample_baseline.py --treatment-dir results/strategy_t0.7 \
     --results-dir results/resample --temperatures 0.7
+# Evaluate EVERY trajectory of each arm into the arm's OWN dir (one row per
+# genuine trajectory: duplicates propagate, empty patches count as failures):
+for IID in $(jq -r .instance_id results/strategy_t0.7/predictions.jsonl); do
+  python scripts/eval_all_trajectories.py --results-dir results/strategy_t0.7 --instance $IID
+  python scripts/eval_all_trajectories.py --results-dir results/resample_t0.7 --instance $IID
+done
 # Metrics + R5 analysis:
 python scripts/compute_metrics.py \
     --predictions results/strategy_t0.7/predictions_all_trajectories.jsonl \
@@ -343,7 +382,15 @@ artifacts. On the existing `results/branching` run this already yields ~12.9 M t
 tokens over 53 trajectories with **0** passing branches above the 250-step baseline
 cap (max passing = 164 steps), so the step-limit asymmetry did not manufacture wins.
 Cost in $ is omitted only because the local vLLM model is unregistered for litellm
-cost calculation; tokens and steps are the compute proxies.
+cost calculation; tokens and steps are the compute proxies. **Known undercount,
+disclosed:** the treatment arm's strategy-proposer call, intent-extraction
+sub-calls, and DeBERTa-NLI forward passes are not stored in the per-trajectory
+`.traj.json` transcripts and are excluded from these sums — the exclusion is
+bounded (one proposer call and O(N²)=10 NLI pair passes of a 0.4B model per
+instance, vs k full agent trajectories) and works *against* the fairness claim's
+margin rather than for it, since the structural argument (vanilla pays k full
+SEARCHes, the treatment one shared SEARCH) rests on the trajectory sums, which
+dominate by orders of magnitude.
 
 | Metric (n=10 easy SymPy) | Matched-k vanilla | Strategy-proposal | SDLG |
 |---|---|---|---|
@@ -393,7 +440,11 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
 7. **Independent-diversity proxy.** Structural (AST-free, line-level) diversity may over-
    or under-count behaviorally-equivalent patches. *Acknowledged:* it is deliberately
    **not** the branching NLI (avoids circularity, R4.2); a behavioral-diversity check is
-   a roadmap item.
+   a roadmap item. Two sub-risks are measured rather than assumed (§3): the exact
+   signature's lexical granularity (bias direction: toward the null — the
+   whole-agent-sampling control produces trivial variants at least as readily), and
+   the productivity confound (an H1 win that is really a patch-production-rate gap
+   is exposed by `nonempty_patch_fraction` + the non-empty-only robustness row).
 8. **Instance-set deviation from the proposal (disclosure).** Proposal Appendix C
    committed to a *difficulty-spanning* SymPy set (sympy-12481 plus nine instances
    rated <15 min up to >4 hr) to test whether branching helps more on harder

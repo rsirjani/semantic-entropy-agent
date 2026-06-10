@@ -202,8 +202,16 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
             "more than the baseline's total step budget — the step_limit asymmetry did "
             "NOT manufacture wins. tokens_arm_total is the per-arm token compute "
             "accounting (summed from each trajectory's litellm response usage); compare "
-            "it across arms at matched k. Cost in $ is omitted only because the local "
-            "vLLM model is not registered for litellm cost calculation."
+            "it across arms at matched k. KNOWN UNDERCOUNT on the treatment arm: the "
+            "strategy-proposer call and intent-extraction sub-calls are not stored in "
+            "the per-trajectory .traj.json transcripts, and DeBERTa-NLI forward passes "
+            "are a different (0.4B) model — all excluded from these sums. The exclusion "
+            "is bounded (one proposer call and O(N^2) NLI passes per instance vs k full "
+            "agent trajectories) but means the treatment arm's true total is slightly "
+            "HIGHER than reported; the structural claim that the matched-k vanilla arm "
+            "pays at least as much (k full SEARCHes vs one shared SEARCH) rests on the "
+            "trajectory sums, which dominate. Cost in $ is omitted only because the "
+            "local vLLM model is not registered for litellm cost calculation."
         ),
     }
 

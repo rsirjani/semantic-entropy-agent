@@ -230,7 +230,17 @@ writeup with justification.
   both arms at the common per-instance k\* = min(k_A, k_B) via the Chen estimator
   and reports every k-mismatched instance — failed resamples, `--max-k` caps, or
   capture losses must never silently hand the larger arm a mechanical any-pass
-  advantage.
+  advantage. **Eval-record completeness:** the per-arm eval artifacts must contain
+  exactly ONE row per genuine trajectory — duplicate patches may be evaluated once
+  for compute, but every duplicate trajectory inherits its representative's
+  outcome (marked as propagated), and empty patches count as failed draws without
+  a container run — because the Chen estimator's (n, c) must count what the arm
+  *produced*. The vanilla arm's duplicate patches are the mode-collapse signal
+  itself; an eval step that drops them deflates vanilla's k and silently
+  subsamples the treatment's coverage at the shrunken k\*. Metric loaders must
+  drop the best-of duplicate row consistently whether its trajectory id is
+  `"primary"` or null, and all post-hoc parsers of append-mode run logs must read
+  the LAST run's block (re-runs append; predictions/metadata reflect the last run).
 - **R4.2 — Diversity measured INDEPENDENTLY of the branching signal.** The
   diversity of the final outputs must NOT be measured with the same DeBERTa-NLI
   clustering used to *decide* branching (circular). Use an independent metric over
@@ -239,7 +249,13 @@ writeup with justification.
   must exist as a runnable script over the predictions artifacts. Cross-arm
   distinct-count differences at unequal sample counts must use a rarefaction
   estimator (expected distinct in a random k\*-subset) — raw distinct counts rise
-  mechanically with sample size.
+  mechanically with sample size. **Productivity-confound diagnostics:** an empty
+  patch lowers the rarefied distinct count exactly like a duplicate, so a
+  diversity "gain" can masquerade for a patch-production-rate gap; the comparison
+  must report each arm's non-empty patch fraction and a descriptive non-empty-only
+  rarefied-gain robustness row (computed at k\*_ne = min non-empty count), fixed
+  before the runs, and the writeup must state the exact-signature granularity
+  (lexical variants count as distinct in both arms) with its bias direction.
 - **R4.3 — Diversity measured on FINAL patches, not proposal-time branches**
   (branches can converge downstream).
 - **R4.4 (strengthening, not blocker) — Selection-aware accuracy:** a *deployable*
@@ -328,7 +344,10 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
   evidence of no effect when the test could not have rejected.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
-  manufacture wins), and per-arm token/compute accounting reported.
+  manufacture wins), and per-arm token/compute accounting reported — with any
+  systematic exclusions (calls not stored in the per-trajectory transcripts, e.g.
+  the strategy proposer and NLI passes) disclosed alongside, including which arm
+  the exclusion favors.
 - **R6.4 — Threats to validity** enumerated and either addressed or acknowledged
   (cherry-picked difficulty band, single repo, oracle selection, n).
 
@@ -339,7 +358,11 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
 - **R7.1** One documented command per arm reproduces its predictions; configs are
   checked in; the NLI/vLLM/Docker prerequisites are documented.
 - **R7.2** No silent data loss: every completed trajectory's patch is captured
-  before container teardown; predictions JSONL schema is documented and stable.
+  before container teardown; predictions JSONL schema is documented and stable;
+  the evaluation step writes its per-instance eval records into the **arm's own
+  results dir** (no hardcoded shared default — evaluating one arm must not be
+  able to overwrite another arm's eval files), and every genuine trajectory of
+  the run appears in the eval record (see R4.1 eval-record completeness).
 - **R7.3** Figures/tables are regenerable from the predictions artifacts by a
   checked-in script.
 - **R7.4** Determinism knobs (seeds where applicable, model/temperature, package

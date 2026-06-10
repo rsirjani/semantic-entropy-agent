@@ -121,7 +121,13 @@ def parse_instance(results_dir: str, iid: str) -> dict | None:
                 text = f.read()
         except Exception:
             text = ""
-        m = _HEADER_RE.search(text)
+        # The decisions log is APPEND-mode: a re-run adds a second STRATEGY
+        # PROPOSAL block while predictions keep-last and metadata.json is
+        # overwritten — so the LAST block is the one whose partition matches
+        # the trajectories being subsetted; the first would be stale.
+        m = None
+        for m in _HEADER_RE.finditer(text):
+            pass
         if m:
             n_clusters = int(m.group(2))
             entropy = float(m.group(4))

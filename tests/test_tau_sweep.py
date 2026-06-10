@@ -161,3 +161,29 @@ def test_sweep_default_grid_is_achievable_set(tmp_path):
     assert report["n_candidates"] == 5
     assert [r["tau"] for r in report["sweep"]] == report["achievable_entropies"]
     assert len(report["achievable_entropies"]) == 7
+
+
+def test_sweep_parses_last_block_after_rerun(tmp_path):
+    """phased_decisions.log is append-mode: a re-run appends a second STRATEGY
+    PROPOSAL block while predictions keep-last and metadata.json is
+    overwritten. The sweep must read the LAST block — the first is stale and
+    its partition would be joined against the wrong trajectories."""
+    rd = str(tmp_path)
+    # First (stale) run: 5 strategies in 5 clusters, entropy 1.609.
+    _write_log(rd, "i1", 1.609, [0, 1, 2, 3, 4])
+    # Re-run appends: 5 strategies in 2 clusters, sizes [3,2], entropy 0.673.
+    log_path = os.path.join(rd, "i1", "phased_decisions.log")
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\nSTRATEGY PROPOSAL\n"
+                "Proposed: 5 | Clusters: 2 | Unique: 2 | Entropy: 0.673\n")
+        for i, c in enumerate([0, 0, 0, 1, 1]):
+            f.write(f"  [{i+1}] cluster={c}: strategy text {i}\n")
+        f.write("\nUnique strategies to fork:\n")
+    _write_eval(rd, "i1", {"t0": True, "t0_strategy_1": False})
+    report = ts.sweep(rd, rd, taus=[1.0])
+    info = report["per_instance"]["i1"]
+    assert info["cluster_sizes"] == [3, 2]              # from the LAST block
+    assert abs(info["entropy"] - 0.6730116) < 1e-4
+    # 0.673 <= 1.0 -> gate declines; dominant cluster 0 -> t0 passes.
+    row = report["sweep"][0]
+    assert row["branch_rate"] == 0.0 and row["gated_pass_rate"] == 1.0

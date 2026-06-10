@@ -99,7 +99,10 @@ def load_eval(eval_path: str) -> dict[str, list[bool]]:
     Drops the best-of duplicate ("primary") trajectory so the matched-k count n
     reflects only GENUINE trajectories — consistent with load_predictions, which
     skips the same duplicate. (Counting primary would inflate n by 1 and bias the
-    Chen et al. matched-k estimate.)
+    Chen et al. matched-k estimate.) A null trajectory_id is the same best-of
+    row unnormalized and is dropped too — load_eval_by_tid already dropped None,
+    and the two loaders disagreeing on n would silently desync the coverage
+    table from every tid-joined analysis.
     """
     out: dict[str, list[bool]] = {}
     for fp in _eval_files(eval_path):
@@ -112,7 +115,7 @@ def load_eval(eval_path: str) -> dict[str, list[bool]]:
         if not iid:
             continue
         out[iid] = [bool(t.get("resolved")) for t in d.get("trajectories", [])
-                    if t.get("trajectory_id") != "primary"]
+                    if t.get("trajectory_id") not in (None, "primary")]
     return out
 
 
@@ -167,6 +170,12 @@ def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
     Strategy arm: the `Entropy:` line in <results_dir>/<iid>/phased_decisions.log.
     SDLG arm fallback: the first `entropy` in <results_dir>/<iid>/branching_log.json.
     Missing → instance omitted (treated as 'unknown' downstream).
+
+    The decisions log is APPEND-mode: a re-run of the same instance into the
+    same results dir adds a second STRATEGY PROPOSAL block, while the
+    predictions loader keeps the LAST run's rows and metadata.json is
+    overwritten. The LAST `Entropy:` match is therefore the one consistent
+    with the trajectories being scored — the first would be stale.
     """
     out: dict[str, float] = {}
     if not results_dir:
@@ -176,9 +185,9 @@ def load_entropy(results_dir: str | None, instance_ids) -> dict[str, float]:
         if os.path.isfile(log):
             try:
                 with open(log, "r", encoding="utf-8") as f:
-                    m = _ENTROPY_RE.search(f.read())
-                if m:
-                    out[iid] = float(m.group(1))
+                    matches = _ENTROPY_RE.findall(f.read())
+                if matches:
+                    out[iid] = float(matches[-1])
                     continue
             except Exception:
                 pass
@@ -290,6 +299,7 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
     # the difference.
     if preds_a is not None and preds_b is not None:
         rare_diffs, rare_a, rare_b = [], [], []
+        ne_diffs, ne_frac_a, ne_frac_b = [], [], []
         for i in usable:
             pa, pb = preds_a.get(i, []), preds_b.get(i, [])
             if not pa or not pb:
@@ -302,6 +312,22 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
             rare_a.append(ra)
             rare_b.append(rb)
             rare_diffs.append(ra - rb)
+            # Productivity-confound diagnostics: an empty patch lowers the
+            # rarefied distinct count exactly like a duplicate, so an H1 "win"
+            # could in principle be a patch-PRODUCTION-rate gap, not a
+            # diversity gap. Report each arm's non-empty fraction, and a
+            # DESCRIPTIVE robustness row computed over non-empty patches only
+            # at k*_ne = min(#nonempty_a, #nonempty_b): if the headline H1
+            # gain survives there, it is diversity among produced solutions,
+            # not productivity.
+            ne_a = [p for p in pa if p.strip()]
+            ne_b = [p for p in pb if p.strip()]
+            ne_frac_a.append(len(ne_a) / len(pa))
+            ne_frac_b.append(len(ne_b) / len(pb))
+            k_ne = min(len(ne_a), len(ne_b))
+            if k_ne > 0:
+                ne_diffs.append(expected_distinct_at_k(ne_a, k_ne)
+                                - expected_distinct_at_k(ne_b, k_ne))
         if rare_diffs:
             rpt, rlo, rhi = bootstrap_ci(rare_diffs, np.mean, seed=seed)
             apt, alo, ahi = bootstrap_ci(rare_a, np.mean, seed=seed)
@@ -318,6 +344,24 @@ def compare(table_a: dict, table_b: dict, entropy: dict[str, float], seed: int,
                 "arm_a": {"mean": round(apt, 4), "ci95": [round(alo, 4), round(ahi, 4)]},
                 "arm_b": {"mean": round(bpt, 4), "ci95": [round(blo, 4), round(bhi, 4)]},
             }
+            result["nonempty_patch_fraction"] = {
+                "arm_a": round(float(np.mean(ne_frac_a)), 4),
+                "arm_b": round(float(np.mean(ne_frac_b)), 4),
+            }
+            result["rarefied_distinct_gain_nonempty"] = (
+                {
+                    "mean": round(float(np.mean(ne_diffs)), 4),
+                    "n": len(ne_diffs),
+                    "paired_sign_flip_p": round(
+                        paired_permutation_pvalue(ne_diffs, seed=seed), 5),
+                    "min_achievable_p": round(
+                        min_achievable_sign_flip_p(ne_diffs), 5),
+                    "note": ("DESCRIPTIVE robustness row (not the confirmatory "
+                             "endpoint): rarefied distinct gain over non-empty "
+                             "patches only, at k*_ne = min nonempty count — "
+                             "separates diversity-among-produced-solutions from "
+                             "the patch-production rate."),
+                } if ne_diffs else None)
 
     # R5.2 — stratify the gain by post-search entropy (split at median unless given).
     # `thr` is computed ONCE here and reused for the R5.4 low-entropy flag below so
@@ -502,6 +546,15 @@ def main() -> None:
             print(f"  [H1/diversity] per-arm rarefied distinct @k*: "
                   f"{args.label_a}={ra['arm_a']['mean']} CI95={ra['arm_a']['ci95']}, "
                   f"{args.label_b}={ra['arm_b']['mean']} CI95={ra['arm_b']['ci95']}")
+            nef = comp.get("nonempty_patch_fraction")
+            ner = comp.get("rarefied_distinct_gain_nonempty")
+            if nef:
+                print(f"  [H1 diagnostics] non-empty patch fraction: "
+                      f"{args.label_a}={nef['arm_a']}, {args.label_b}={nef['arm_b']}")
+            if ner:
+                print(f"  [H1 robustness, descriptive] non-empty-only rarefied gain "
+                      f"@k*_ne: {ner['mean']}  sign-flip p={ner['paired_sign_flip_p']} "
+                      f"(n={ner['n']})")
         if "gain_by_stratum" in comp:
             print(f"  by entropy (split={comp['entropy_split_threshold']}): {comp['gain_by_stratum']}")
         omr = [o for o in comp["off_mode_recovery_candidates"] if o["low_entropy"]]
