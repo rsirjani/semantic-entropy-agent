@@ -90,6 +90,98 @@ def test_phase_a_is_the_preregistered_primary():
     assert spec["arm"] == "strategy_proposal" and spec["clustering"] == "greedy"
 
 
+def test_build_steps_audits_both_arms():
+    """R6.3: the fairness comparison needs BOTH arms' token totals."""
+    steps = {s["name"]: s for s in rc.build_steps("strategy_t0.7")}
+    tcmd = steps["strategy_t0.7/budget_audit_treatment"]["cmd"]
+    ccmd = steps["strategy_t0.7/budget_audit_control"]["cmd"]
+    assert tcmd[tcmd.index("--results-dir") + 1].endswith("strategy_t0.7")
+    assert ccmd[ccmd.index("--results-dir") + 1].endswith(
+        "resample_strategy_t0.7_t0.7")
+    # Distinct output files — neither audit overwrites the other.
+    assert tcmd[tcmd.index("--out") + 1] != ccmd[ccmd.index("--out") + 1]
+
+
+def _script_long_flags(script_name: str) -> set[str]:
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "scripts", script_name)
+    with open(path, "r", encoding="utf-8") as f:
+        src = f.read()
+    import re
+    return set(re.findall(r'add_argument\(\s*"(--[a-z][a-z-]*)"', src))
+
+
+def test_build_steps_flags_exist_in_target_scripts():
+    """Wiring-drift guard: every flag the campaign constructs must exist in the
+    target script's argparse. The campaign worktree once diverged from the
+    driver fixes for four scrutiny iterations — this makes that class of drift
+    a test failure instead of a mid-campaign crash."""
+    for key in rc.MENU:
+        for step in rc.build_steps(key):
+            cmd = step.get("cmd")
+            if not cmd:
+                continue
+            script = os.path.basename(cmd[1])
+            known = _script_long_flags(script)
+            used = {c for c in cmd if c.startswith("--")}
+            assert used <= known, f"{step['name']}: {script} lacks {used - known}"
+
+
+def test_eval_loop_flags_exist():
+    known = _script_long_flags("eval_all_trajectories.py")
+    assert {"--results-dir", "--instance"} <= known
+
+
+def test_analyst_prompt_reflects_current_design():
+    """The analyst must be pointed at the post-iteration-7 design, not the
+    iteration-3 snapshot: H1 before H2, power floor, gate-saturation check,
+    productivity diagnostic, and the first-run-is-confirmatory pin."""
+    state = _state(completed=["strategy_t0.7"])
+    state["phase_log"] = [{"spec": "strategy_t0.7", "status": "completed",
+                           "metrics_path": "results/metrics_x.json"}]
+    p = rc.analyst_prompt(state, "campaign_decisions/decision_01.json")
+    for needle in ("scrutiny_07", "H1", "H2", "min_achievable_p",
+                   "nonempty_patch_fraction", "threat 11",
+                   "FIRST completed Phase A", "BOTH arms"):
+        assert needle in p, f"analyst prompt missing: {needle}"
+
+
+# --------------------------------------------------------------------------- #
+# vLLM model-identity check (R7.4)
+# --------------------------------------------------------------------------- #
+
+def test_expected_model_id_strips_litellm_prefix(tmp_path):
+    cfg = tmp_path / "branching.yaml"
+    cfg.write_text("model:\n  model_name: \"openai/qwen3-coder\"\n", encoding="utf-8")
+    assert rc.expected_model_id(str(cfg)) == "qwen3-coder"
+    cfg.write_text("model:\n  model_name: \"qwen3-coder\"\n", encoding="utf-8")
+    assert rc.expected_model_id(str(cfg)) == "qwen3-coder"
+    assert rc.expected_model_id(str(tmp_path / "missing.yaml")) is None
+
+
+def test_unexpected_tree_changes_flags_code_not_artifacts():
+    before = " M results/old.json\n"
+    after = (" M results/old.json\n"
+             "?? campaign_decisions/decision_01.json\n"
+             "?? results/campaign/campaign.log\n"
+             " M scripts/compute_metrics.py\n"
+             'R  "configs/branching.yaml" -> "configs/evil.yaml"\n')
+    flagged = rc.unexpected_tree_changes(before, after)
+    assert len(flagged) == 2
+    assert any("compute_metrics" in f for f in flagged)
+    assert any("evil" in f for f in flagged)
+    # No changes -> nothing flagged
+    assert rc.unexpected_tree_changes(before, before) == []
+
+
+def test_model_mismatch_only_on_demonstrable_mismatch():
+    assert rc.model_mismatch_error("qwen3-coder", ["qwen3-coder"]) is None
+    assert rc.model_mismatch_error("qwen3-coder", []) is None      # unknown served
+    assert rc.model_mismatch_error(None, ["other"]) is None        # unknown expected
+    err = rc.model_mismatch_error("qwen3-coder", ["llama-3-8b"])
+    assert err and "qwen3-coder" in err and "llama-3-8b" in err
+
+
 # --------------------------------------------------------------------------- #
 # Guardrails
 # --------------------------------------------------------------------------- #

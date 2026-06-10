@@ -17,6 +17,17 @@ joins steps to resolved by trajectory_id (NOT by index), and reports the step
 distribution overall and FOR PASSING branches, plus how many passing branches
 exceeded a reference cap (default 250 = the baseline's total budget).
 
+BOTH arms' layouts are supported (R6.3 says per-ARM accounting — an audit tool
+that can only read the treatment cannot verify the fairness claim it states):
+  - treatment (branching) layout:  <results_dir>/<iid>/metadata.json
+  - control (resample) layout:     <results_dir>/<iid>/run<idx>/<iid>/metadata.json
+    (each resample is its own orchestrator run; its draw is identified as
+    trajectory_id "run<idx>" in the predictions/eval record, so the audit maps
+    the run-dir name to that tid and sums steps/tokens within the run dir).
+The layout is auto-detected per results dir; a resample run that crashed before
+writing metadata simply has no steps/tokens rows (its empty-patch draw still
+counts in the eval record), reported via n_draws_missing_metadata.
+
 Token accounting (R6.3 "per-arm token/compute accounting reported"): the
 mini-swe-agent litellm model already stores the full provider response on every
 assistant message (`extra.response.usage` with prompt/completion/total tokens), so
@@ -120,6 +131,112 @@ def _tokens_by_tid(results_dir: str) -> dict[str, dict[str, dict]]:
     return out
 
 
+def _sum_tokens(dicts: list[dict]) -> dict:
+    out = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+           "n_calls_with_usage": 0}
+    for d in dicts:
+        for k in out:
+            out[k] += d.get(k, 0)
+    return out
+
+
+def detect_layout(results_dir: str) -> str:
+    """'treatment' (<dir>/<iid>/metadata.json) or 'control' (<dir>/<iid>/run<i>/<iid>/metadata.json)."""
+    if glob.glob(os.path.join(results_dir, "*", "metadata.json")):
+        return "treatment"
+    if glob.glob(os.path.join(results_dir, "*", "run*", "*", "metadata.json")):
+        return "control"
+    return "empty"
+
+
+def collect_draw_records(results_dir: str) -> tuple[dict, str, int]:
+    """Normalize either arm layout into per-instance draw records.
+
+    Returns ({iid: {"draws": [(tid, steps)], "total_steps": float|None,
+                    "elapsed": float|None, "tokens": {tid: token_dict}}},
+             layout, n_draws_missing_metadata).
+
+    Treatment: draws come from metadata.json's patches list (one entry per
+    genuine draw post-iteration-6), tid as recorded. Control: each run<idx>
+    subdir is one resample draw whose predictions/eval tid is "run<idx>"; its
+    inner orchestrator metadata supplies the steps, and the run dir's
+    transcripts supply the tokens. A run dir with no metadata (the resample
+    crashed before the orchestrator saved) is counted in
+    n_draws_missing_metadata — its empty-patch draw still exists in the
+    predictions/eval record, it just contributes no steps/tokens here.
+    """
+    records: dict[str, dict] = {}
+    layout = detect_layout(results_dir)
+    n_missing = 0
+
+    if layout == "treatment":
+        tokens = _tokens_by_tid(results_dir)
+        for meta in sorted(glob.glob(os.path.join(results_dir, "*", "metadata.json"))):
+            try:
+                with open(meta, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:
+                continue
+            iid = d.get("instance_id")
+            if not iid:
+                continue
+            draws = [(p.get("trajectory_id"), float(p["steps"]))
+                     for p in d.get("patches", [])
+                     if p.get("steps") is not None and p.get("trajectory_id") != "primary"]
+            records[iid] = {
+                "draws": draws,
+                "total_steps": float(d["total_steps"]) if "total_steps" in d else None,
+                "elapsed": float(d["elapsed_seconds"]) if "elapsed_seconds" in d else None,
+                "tokens": tokens.get(iid, {}),
+            }
+        return records, layout, n_missing
+
+    if layout == "control":
+        for iid_dir in sorted(glob.glob(os.path.join(results_dir, "*"))):
+            if not os.path.isdir(iid_dir):
+                continue
+            iid = os.path.basename(iid_dir)
+            run_dirs = sorted(
+                (p for p in glob.glob(os.path.join(iid_dir, "run*")) if os.path.isdir(p)),
+                key=lambda p: (len(os.path.basename(p)), os.path.basename(p)),
+            )
+            if not run_dirs:
+                continue
+            rec = {"draws": [], "total_steps": 0.0, "elapsed": 0.0, "tokens": {}}
+            saw_total = saw_elapsed = False
+            for run_dir in run_dirs:
+                tid = os.path.basename(run_dir)  # "run<idx>" == predictions/eval tid
+                metas = glob.glob(os.path.join(run_dir, "*", "metadata.json"))
+                if not metas:
+                    n_missing += 1
+                    continue
+                try:
+                    with open(metas[0], "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    n_missing += 1
+                    continue
+                steps = sum(float(p["steps"]) for p in d.get("patches", [])
+                            if p.get("steps") is not None and p.get("trajectory_id") != "primary")
+                rec["draws"].append((tid, steps))
+                if "total_steps" in d:
+                    rec["total_steps"] += float(d["total_steps"]); saw_total = True
+                if "elapsed_seconds" in d:
+                    rec["elapsed"] += float(d["elapsed_seconds"]); saw_elapsed = True
+                run_tokens = [_traj_tokens(t) for t in sorted(
+                    glob.glob(os.path.join(run_dir, "*", "trajectory_*.traj.json")))]
+                if run_tokens:
+                    rec["tokens"][tid] = _sum_tokens(run_tokens)
+            if not saw_total:
+                rec["total_steps"] = None
+            if not saw_elapsed:
+                rec["elapsed"] = None
+            records[iid] = rec
+        return records, layout, n_missing
+
+    return records, layout, n_missing
+
+
 def _dist(values: list[float]) -> dict:
     if not values:
         return {"n": 0, "min": None, "median": None, "mean": None, "max": None}
@@ -130,7 +247,7 @@ def _dist(values: list[float]) -> dict:
 
 def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
     resolved = _resolved_by_tid(eval_path)
-    tokens = _tokens_by_tid(results_dir)
+    records, layout, n_missing = collect_draw_records(results_dir)
     all_steps: list[float] = []
     passing_steps: list[float] = []
     total_steps_per_instance: list[float] = []
@@ -140,32 +257,16 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
     passing_total_tokens: list[float] = []
     arm_prompt_tokens = arm_completion_tokens = arm_total_tokens = 0
     n_traj_with_tokens = 0
-    n_instances = 0
 
-    for meta in sorted(glob.glob(os.path.join(results_dir, "*", "metadata.json"))):
-        try:
-            with open(meta, "r", encoding="utf-8") as f:
-                d = json.load(f)
-        except Exception:
-            continue
-        iid = d.get("instance_id")
-        if not iid:
-            continue
-        n_instances += 1
-        if "total_steps" in d:
-            total_steps_per_instance.append(float(d["total_steps"]))
-        if "elapsed_seconds" in d:
-            elapsed_per_instance.append(float(d["elapsed_seconds"]))
+    for iid, rec in records.items():
+        if rec["total_steps"] is not None:
+            total_steps_per_instance.append(rec["total_steps"])
+        if rec["elapsed"] is not None:
+            elapsed_per_instance.append(rec["elapsed"])
         res = resolved.get(iid, {})
-        for p in d.get("patches", []):
-            tid = p.get("trajectory_id")
-            steps = p.get("steps")
-            # Skip the best-of duplicate ("primary") so its steps are not counted
-            # twice against the genuine trajectory it copies.
-            if steps is None or tid == "primary":
-                continue
-            all_steps.append(float(steps))
-            tok = tokens.get(iid, {}).get(tid)
+        for tid, steps in rec["draws"]:
+            all_steps.append(steps)
+            tok = rec["tokens"].get(tid)
             if tok and tok.get("n_calls_with_usage", 0) > 0:
                 arm_prompt_tokens += tok["prompt_tokens"]
                 arm_completion_tokens += tok["completion_tokens"]
@@ -173,7 +274,7 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
                 traj_total_tokens.append(float(tok["total_tokens"]))
                 n_traj_with_tokens += 1
             if res.get(tid):
-                passing_steps.append(float(steps))
+                passing_steps.append(steps)
                 if tok and tok.get("n_calls_with_usage", 0) > 0:
                     passing_total_tokens.append(float(tok["total_tokens"]))
                 if steps > reference_cap:
@@ -182,7 +283,9 @@ def audit(results_dir: str, eval_path: str, reference_cap: int) -> dict:
 
     return {
         "results_dir": results_dir,
-        "n_instances": n_instances,
+        "layout": layout,
+        "n_instances": len(records),
+        "n_draws_missing_metadata": n_missing,
         "reference_cap": reference_cap,
         "steps_all_trajectories": _dist(all_steps),
         "steps_passing_trajectories": _dist(passing_steps),

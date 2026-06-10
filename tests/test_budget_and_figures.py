@@ -94,6 +94,72 @@ def test_budget_audit_sums_tokens_from_transcripts(tmp_path):
     assert rep["tokens_passing_trajectories"]["max"] == 330.0
 
 
+def _write_control_run(d, iid, run_name, steps, usages, inner_iid=None,
+                       write_metadata=True):
+    """Control layout: <d>/<iid>/<run_name>/<iid>/{metadata.json, trajectory_t0.traj.json}."""
+    inner = os.path.join(d, iid, run_name, inner_iid or iid)
+    os.makedirs(inner, exist_ok=True)
+    if write_metadata:
+        with open(os.path.join(inner, "metadata.json"), "w", encoding="utf-8") as f:
+            json.dump({"instance_id": iid, "total_steps": steps,
+                       "elapsed_seconds": 10.0,
+                       "patches": [{"trajectory_id": "t0", "patch": "x",
+                                    "submitted": True, "steps": steps}]}, f)
+    messages = []
+    for pt, ct in usages:
+        messages.append({"role": "assistant", "content": "x", "extra": {"response": {
+            "usage": {"prompt_tokens": pt, "completion_tokens": ct,
+                      "total_tokens": pt + ct}}}})
+    with open(os.path.join(inner, "trajectory_t0.traj.json"), "w", encoding="utf-8") as f:
+        json.dump({"messages": messages, "trajectory_format": "v1"}, f)
+
+
+def test_budget_audit_reads_control_resample_layout(tmp_path):
+    """R6.3: per-ARM accounting must be computable on the vanilla arm's layout.
+
+    The resample arm nests each draw's orchestrator output at
+    <dir>/<iid>/run<idx>/<iid>/...; its predictions/eval tid is "run<idx>".
+    The audit must map run dirs to those tids so steps/tokens join to
+    `resolved` — otherwise the fairness note's cross-arm token comparison is
+    unverifiable on the control.
+    """
+    d = str(tmp_path)
+    _write_control_run(d, "i1", "run0", steps=30, usages=[(100, 10)])
+    _write_control_run(d, "i1", "run1", steps=300, usages=[(200, 20), (50, 5)])
+    # run2 crashed before the orchestrator wrote metadata: still a draw in the
+    # eval record (empty patch), but contributes no steps/tokens here.
+    _write_control_run(d, "i1", "run2", steps=0, usages=[], write_metadata=False)
+    _write_eval(d, "i1", {"run0": False, "run1": True, "run2": False})
+
+    rep = ba.audit(d, d, reference_cap=250)
+    assert rep["layout"] == "control"
+    assert rep["n_instances"] == 1
+    assert rep["n_draws_missing_metadata"] == 1
+    # steps: run0=30, run1=300 (run2 missing)
+    assert rep["steps_all_trajectories"]["n"] == 2
+    assert rep["steps_all_trajectories"]["max"] == 300.0
+    # run1 passes AND exceeds the 250-step reference cap
+    assert rep["steps_passing_trajectories"]["n"] == 1
+    over = rep["passing_branches_over_reference_cap"]
+    assert len(over) == 1 and over[0]["trajectory_id"] == "run1"
+    # tokens: run0=110, run1=275 -> arm total 385
+    tok = rep["tokens_arm_total"]
+    assert tok["total_tokens"] == 385 and tok["n_trajectories_with_tokens"] == 2
+    assert rep["tokens_passing_trajectories"]["max"] == 275.0
+    # per-instance totals are summed across the instance's runs
+    assert rep["total_steps_per_instance"]["max"] == 330.0
+
+
+def test_budget_audit_treatment_layout_detected(tmp_path):
+    d = str(tmp_path)
+    _write_metadata(d, "i1", [{"trajectory_id": "t0", "patch": "x",
+                               "submitted": True, "steps": 30}], total_steps=30)
+    _write_eval(d, "i1", {"t0": True})
+    rep = ba.audit(d, d, reference_cap=250)
+    assert rep["layout"] == "treatment"
+    assert rep["n_draws_missing_metadata"] == 0
+
+
 def test_make_figures_renders_pngs(tmp_path):
     report = {
         "treatment": {"summary": {

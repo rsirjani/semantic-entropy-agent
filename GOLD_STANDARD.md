@@ -341,13 +341,26 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
   disclosure required:** the exact sign-flip p has a tie-imposed floor
   p ≥ 2^(1+z−n) (z = zero gains); the analysis must report this
   (`min_achievable_p`) beside every sign-flip p so a null is never presented as
-  evidence of no effect when the test could not have rejected.
+  evidence of no effect when the test could not have rejected. **Adaptive
+  execution boundary:** if run scheduling is automated with a data-reading
+  agent (the campaign driver), its adaptivity may touch **exploratory cells
+  only** — the confirmatory cell runs first, exactly once, by a fixed command
+  sequence; the FIRST completed confirmatory run is the confirmatory dataset
+  (a repeat draw is variance estimation, never a replacement or pooling
+  partner); every scheduling decision is a checked-in artifact with a written
+  rationale; and the writeup discloses that the exploratory cell set is
+  data-dependent.
 - **R6.3 — Budget-fairness audit:** per-trajectory step distributions reported for
   passing branches (the `step_limit` 250→300 asymmetry must be shown not to
   manufacture wins), and per-arm token/compute accounting reported — with any
   systematic exclusions (calls not stored in the per-trajectory transcripts, e.g.
   the strategy proposer and NLI passes) disclosed alongside, including which arm
-  the exclusion favors.
+  the exclusion favors. **Per-arm means BOTH arms:** the audit tool must read
+  each arm's actual artifact layout (treatment `<iid>/metadata.json`; control
+  `<iid>/run<idx>/<iid>/metadata.json`, draws keyed by the predictions tid
+  `run<idx>`), stage-tested on both — a fairness comparison whose tool can only
+  read the treatment arm is an assertion, not an audit — and the documented
+  workflow must audit the control alongside the treatment.
 - **R6.4 — Threats to validity** enumerated and either addressed or acknowledged
   (cherry-picked difficulty band, single repo, oracle selection, n).
 

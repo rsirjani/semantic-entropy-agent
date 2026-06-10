@@ -171,6 +171,21 @@ robustness row: treatment (T = 0.7) vs vanilla at *its best* sweep temperature �
 the headline gain survives only against vanilla's worst temperature, that is
 reported, not hidden.
 
+**Adaptive execution of the exploratory cells (disclosed).** The runs are executed
+by an autonomous campaign driver (`scripts/run_campaign.py`): the confirmatory cell
+always runs **first, exactly once**, with the deterministic command sequence above;
+which *exploratory* cells run afterwards — and when the campaign stops — is chosen
+adaptively by an LLM analyst reading the completed cells' metric outputs, from a
+fixed pre-declared menu (SDLG arm, T = 0.2/1.0, clustering variants, one repeat
+draw). Three consequences are pinned in advance: (i) the confirmatory dataset is
+the **first** completed Phase A run — the repeat draw (`strategy_t0.7_seed2`)
+estimates sampling variance and can never replace, pool into, or re-litigate the
+primary; (ii) adaptivity cannot affect any confirmatory number, only which
+exploratory/descriptive cells exist to report — the set of exploratory cells in
+the paper is therefore data-dependent and is reported as such; (iii) every
+decision is a checked-in artifact (`campaign_decisions/decision_*.json`) with the
+analyst's written rationale, so the selection path is auditable.
+
 ### 2.3 Ablations
 
 - **Generator:** strategy-proposal vs SDLG, isolated (`diversity_method` is a single
@@ -409,10 +424,15 @@ python scripts/compute_metrics.py \
     --compare-predictions results/resample_t0.7/predictions_all_trajectories.jsonl \
     --compare-eval results/resample_t0.7 \
     --out results/metrics_strategy_vs_vanilla_t0.7.json
-# Budget-fairness + per-arm token/compute accounting (R6.3), per arm:
+# Budget-fairness + per-arm token/compute accounting (R6.3) — BOTH arms; the
+# audit auto-detects each arm's layout (treatment: <iid>/metadata.json;
+# control: <iid>/run<idx>/<iid>/metadata.json with tid = "run<idx>"):
 python scripts/budget_audit.py --results-dir results/strategy_t0.7 \
     --eval results/strategy_t0.7 --reference-cap 250 \
     --out results/budget_audit_strategy_t0.7.json
+python scripts/budget_audit.py --results-dir results/resample_t0.7 \
+    --eval results/resample_t0.7 --reference-cap 250 \
+    --out results/budget_audit_resample_t0.7.json
 # Post-hoc tau sweep (R3.3/R5.5) — zero extra GPU runs, from the same artifacts:
 python scripts/tau_sweep.py --results-dir results/strategy_t0.7 \
     --eval results/strategy_t0.7 --out results/tau_sweep_strategy_t0.7.json

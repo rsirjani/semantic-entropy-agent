@@ -1,18 +1,28 @@
 r"""Autonomous experiment campaign: confirmatory pilot -> analyst-driven refinement.
 
-Executes the experiment plan the scrutiny loop converged on (scrutiny_03.md "minimal
-sufficient experiment set"), then lets a headless Fable analyst choose follow-up
+Executes the experiment plan the scrutiny loop converged on (scrutiny_03.md
+"minimal sufficient experiment set", as amended by iterations 4-7: hierarchical
+H1 diversity -> H2 coverage confirmatory family, producer-level draw accounting,
+both-arm budget audits), then lets a headless Fable analyst choose follow-up
 phases FROM ACTUAL DATA, within hard guardrails. Deterministic execution, model-
 driven phase selection — the analyst only ever picks from a fixed menu; every
 command that runs is constructed by this script.
+
+Pre-registration boundary: the analyst orders/stops EXPLORATORY cells only. The
+confirmatory dataset is the FIRST completed Phase A run — a later repeat
+(strategy_t0.7_seed2) estimates sampling variance and can never replace or pool
+into the primary. Decision files (campaign_decisions/decision_*.json) are
+checked-in artifacts; the adaptive exploratory selection is disclosed in
+RESULTS.md §6.
 
 Phase A (confirmatory, always first — the pre-registered primary endpoint):
   1. strategy arm  @ T=0.7, greedy clustering, tau=0 superset run
   2. per-trajectory SWE-bench eval of the treatment
   3. matched-k vanilla control @ T=0.7 (k read from the treatment's metadata)
   4. per-trajectory eval of the control
-  5. compute_metrics (matched-k* + exact sign-flip primary endpoint),
-     budget_audit (both arms), tau_sweep (treatment, post-hoc R3.3/R5.5)
+  5. compute_metrics (H1/H2 matched-k* endpoints + exact sign-flip + power
+     floors), budget_audit (BOTH arms — the fairness comparison needs both
+     token totals), tau_sweep (treatment, post-hoc R3.3/R5.5)
 
 Then up to --max-phases analyst-chosen phases from MENU (exploratory cells:
 SDLG @0.7, temperature 0.2/1.0 cells, clustering variants, a repeat seed), each
@@ -144,6 +154,14 @@ def build_steps(key: str) -> list[dict]:
                  "--eval", d["treatment"], "--reference-cap", "250",
                  "--out", os.path.join(RESULTS, f"budget_audit_{key}.json")],
          "timeout": 1800},
+        # R6.3 is per-ARM accounting: the fairness claim ("the control received
+        # at least as much compute") is only verifiable by comparing BOTH arms'
+        # token totals at matched k, so the control is audited too.
+        {"name": f"{key}/budget_audit_control",
+         "cmd": [py, "scripts/budget_audit.py", "--results-dir", d["control"],
+                 "--eval", d["control"], "--reference-cap", "250",
+                 "--out", os.path.join(RESULTS, f"budget_audit_resample_{key}.json")],
+         "timeout": 1800},
         {"name": f"{key}/tau_sweep_treatment",
          "cmd": [py, "scripts/tau_sweep.py", "--results-dir", d["treatment"],
                  "--eval", d["treatment"],
@@ -230,12 +248,23 @@ def analyst_prompt(state: dict, decision_path: str) -> str:
     return f"""You are the campaign analyst for a research experiment campaign
 (semantic-entropy-gated branching vs matched-k vanilla resampling, SWE-bench SymPy).
 Work in this repository (cwd is the project root). Read, in order:
- 1. review_loop/scrutiny_03.md (the design: pre-registered primary endpoint,
-    confirmatory vs exploratory cells, minimal sufficient experiment set);
- 2. the metrics JSONs of every completed phase listed below (read the comparison
-    block: matched-k* gain, exact sign-flip p, rarefied distinct counts,
-    selected-pass@1, k-mismatch report);
- 3. the budget_audit_*.json and tau_sweep_*.json companions in results/.
+ 1. review_loop/scrutiny_07.md then scrutiny_04.md (the current design: the
+    hierarchical confirmatory family — H1 = rarefied distinct gain at matched
+    k*, H2 = diverse-pass@k* gain tested ONLY if H1 rejects — exact sign-flip
+    inference with its tie-imposed power floor, producer-level draw
+    accounting); scrutiny_03.md for the original endpoint pre-registration;
+ 2. RESULTS.md §2.2 (confirmatory family + matching rules) and §6 threats —
+    especially threat 11 (gate-signal saturation): check the tau_sweep
+    output's realized entropy distribution and realized-N flags BEFORE
+    interpreting any branching numbers;
+ 3. the metrics JSONs of every completed phase listed below (read the
+    comparison block: H1 rarefied distinct gain + exact sign-flip p +
+    min_achievable_p beside it; H2 gain only if H1 rejected;
+    nonempty_patch_fraction per arm — a productivity gap can masquerade as a
+    diversity gap; k-mismatch report; selected-pass@1 with its
+    degenerate-tiebreak count);
+ 4. the budget_audit_*.json (BOTH arms — confirm the control's token total is
+    >= the treatment's at matched k) and tau_sweep_*.json companions in results/.
 
 Completed phases:
 {completed}
@@ -249,13 +278,49 @@ Prefer the mechanism contrast (sdlg_t0.7) if the primary cell shows ANY signal
 if the primary numbers look noise-dominated; prefer temperature cells to test
 robustness only after the mechanism story is anchored; choose stop when another
 cell would not change the paper's conclusions. A null result is a valid outcome —
-do NOT chase a positive. You may NOT invent new specs, edit code, or launch runs
-yourself.
+do NOT chase a positive. The confirmatory dataset is the FIRST completed Phase A
+run; strategy_t0.7_seed2 estimates sampling variance and may never replace, pool
+into, or re-litigate the primary. Your choices order EXPLORATORY cells only —
+they cannot change what is confirmatory. You may NOT invent new specs, edit
+code, or launch runs yourself.
 
 Write EXACTLY one file, `{decision_path}`, valid JSON:
 {{"choice": "<menu key or stop>", "rationale": "<3-8 sentences grounded in the
 numbers you read>", "expectations": "<what result would mean what>"}}
 The LAST thing you do must be writing that file. Make no other changes."""
+
+
+def _tree_fingerprint() -> str:
+    """`git status --porcelain` snapshot (empty string if git unavailable)."""
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=PROJECT_ROOT,
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=60)
+        return out.stdout or ""
+    except Exception:
+        return ""
+
+
+def unexpected_tree_changes(before: str, after: str) -> list[str]:
+    """Status lines that appeared during the analyst run and touch code/config.
+
+    The analyst is prompted to write ONLY its decision file, but it runs with
+    permissions skipped — prompts are not enforcement. Any new change outside
+    campaign_decisions/ or results/ (code, configs, tests, specs) would make
+    every later phase run silently modified experiment code, so the campaign
+    must stop loudly instead.
+    """
+    old = set(before.splitlines())
+    flagged = []
+    for line in after.splitlines():
+        if line in old or not line.strip():
+            continue
+        path = line[3:] if len(line) > 3 else line
+        p = path.split(" -> ")[-1].strip().strip('"').replace("\\", "/")
+        if p.startswith(("campaign_decisions/", "results/")):
+            continue
+        flagged.append(line)
+    return flagged
 
 
 def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
@@ -268,6 +333,7 @@ def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
         return None, "claude CLI not found — stopping (campaign keeps Phase A results)"
     cmd = [exe, "-p", "--output-format", "json", "--model", args.analyst_model,
            "--max-turns", "40", "--dangerously-skip-permissions"]
+    tree_before = _tree_fingerprint()
     try:
         proc = subprocess.run(
             cmd, cwd=PROJECT_ROOT, capture_output=True, text=True,
@@ -277,6 +343,11 @@ def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
         log(f"analyst exit={proc.returncode}")
     except subprocess.TimeoutExpired:
         return None, "analyst timed out — stopping"
+    flagged = unexpected_tree_changes(tree_before, _tree_fingerprint())
+    if flagged:
+        return None, ("analyst modified the working tree outside "
+                      f"campaign_decisions/results ({flagged[:5]}) — stopping; "
+                      "inspect `git status` before resuming")
     if not os.path.isfile(decision_abs):
         return None, "analyst wrote no decision file — stopping"
     try:
@@ -308,6 +379,51 @@ def http_ok(url: str, timeout: int = 5) -> bool:
         return False
 
 
+def expected_model_id(config_path: str | None = None) -> str | None:
+    """The served-model id the runs will request, from configs/branching.yaml.
+
+    litellm routes "openai/<id>" to the local vLLM endpoint with model=<id>,
+    so the id after the provider prefix must match what the container serves.
+    """
+    config_path = config_path or os.path.join(PROJECT_ROOT, "configs", "branching.yaml")
+    try:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        name = ((cfg or {}).get("model", {}) or {}).get("model_name", "") or ""
+    except Exception:
+        return None
+    return (name.split("/", 1)[1] if name.startswith("openai/") else name) or None
+
+
+def model_mismatch_error(expected: str | None, served: list[str]) -> str | None:
+    """Error message iff the vLLM container demonstrably serves the wrong model.
+
+    A standing `docker start vllm-server` can resurrect a container built for a
+    DIFFERENT model than the config expects; every model call would then 404
+    and the campaign would burn its retry budget on a misconfiguration. Only
+    flags a *demonstrable* mismatch (both sides known) — an unreadable config
+    or model list never blocks a run.
+    """
+    if not expected or not served:
+        return None
+    if expected in served:
+        return None
+    return (f"vLLM serves {served} but configs/branching.yaml expects "
+            f"'{expected}' — wrong container/model for this campaign (R7.4). "
+            f"Restart vllm-server with the configured model or fix the config.")
+
+
+def served_model_ids(timeout: int = 10) -> list[str]:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{VLLM_URL}/v1/models", timeout=timeout) as r:
+            data = json.load(r)
+        return [m.get("id", "") for m in data.get("data", []) if isinstance(m, dict)]
+    except Exception:
+        return []
+
+
 def ensure_servers(args) -> None:
     """vLLM (docker) + NLI server must answer before any run step."""
     if not http_ok(f"{VLLM_URL}/v1/models"):
@@ -318,6 +434,9 @@ def ensure_servers(args) -> None:
             time.sleep(15)
         if not http_ok(f"{VLLM_URL}/v1/models"):
             raise RuntimeError("vLLM did not come up within 20 min (docker logs vllm-server)")
+    err = model_mismatch_error(expected_model_id(), served_model_ids())
+    if err:
+        raise RuntimeError(err)
     log("vLLM OK")
 
     if not http_ok(f"{NLI_URL}/health"):
