@@ -404,10 +404,13 @@ do not infer values from these placeholders.
 
 ```bash
 # Treatment (strategy-proposal), T=0.7 (the pre-registered primary T — passed
-# EXPLICITLY so the proposer temperature provably matches the vanilla arm, R2.4):
+# EXPLICITLY so the proposer temperature provably matches the vanilla arm, R2.4).
+# tau=0 is pinned EXPLICITLY for the same reason: the confirmatory cell is
+# defined by (T, tau), and the tau ablation's "superset run" premise (§2.3)
+# must not ride on a config default an edit could silently change:
 python scripts/run_branching.py --config configs/branching.yaml \
     --results-dir results/strategy_t0.7 --clustering-strategy greedy \
-    --temperature 0.7
+    --temperature 0.7 --entropy-threshold 0
 # Matched-k vanilla control at the SAME temperature:
 python scripts/run_resample_baseline.py --treatment-dir results/strategy_t0.7 \
     --results-dir results/resample --temperatures 0.7

@@ -272,3 +272,147 @@ def test_propagate_duplicates_and_empty():
     assert by_id["t1"]["resolved"] is True and by_id["t1"]["deduped_from"] == "t0"
     assert by_id["t2"]["resolved"] is False and by_id["t2"]["empty_patch"]
     assert by_id["t3"]["resolved"] is False
+
+
+# --------------------------------------------------------------------------- #
+# tau pin + server gating (iteration 9)
+# --------------------------------------------------------------------------- #
+
+def test_build_steps_pins_tau_superset_explicitly():
+    """R2.4-class: the confirmatory cell is defined by (T, tau). tau=0 must be
+    on the command line of EVERY treatment run — the post-hoc tau ablation's
+    'superset run' premise must not ride on a config default."""
+    for key in rc.MENU:
+        steps = {s["name"]: s for s in rc.build_steps(key)}
+        cmd = steps[f"{key}/treatment_run"]["cmd"]
+        assert cmd[cmd.index("--entropy-threshold") + 1] == "0", key
+
+
+def test_servers_required_only_for_agent_run_steps():
+    """vLLM/NLI are needed by the agent runs only; evals need Docker, and
+    metrics/audit/sweep are pure post-processing. A dead vLLM container must
+    not block metrics computable from artifacts already on disk."""
+    for key in rc.MENU:
+        for step in rc.build_steps(key):
+            expected = step["name"].endswith(("treatment_run", "control_run"))
+            assert bool(step.get("needs_servers")) == expected, step["name"]
+
+
+# --------------------------------------------------------------------------- #
+# Campaign loop end-to-end (mocked) — the rehearsal iteration 8 queued
+# --------------------------------------------------------------------------- #
+
+def _patch_campaign_paths(monkeypatch, tmp_path):
+    results = tmp_path / "results"
+    campaign = results / "campaign"
+    decisions = tmp_path / "campaign_decisions"
+    monkeypatch.setattr(rc, "RESULTS", str(results))
+    monkeypatch.setattr(rc, "CAMPAIGN_DIR", str(campaign))
+    monkeypatch.setattr(rc, "DECISIONS_DIR", str(decisions))
+    monkeypatch.setattr(rc, "STATE_PATH", str(campaign / "campaign_state.json"))
+    monkeypatch.setattr(rc, "STOP_FILE", str(decisions / "STOP"))
+
+
+def test_campaign_loop_end_to_end_mocked(monkeypatch, tmp_path):
+    """Execute main()'s full state machine with stubbed steps/analyst: Phase A
+    runs first and completely, the analyst is consulted only afterwards, its
+    choice runs, 'stop' ends the campaign, and the persisted state records the
+    completed specs in order. ensure_servers fires only for the agent runs."""
+    _patch_campaign_paths(monkeypatch, tmp_path)
+    executed, server_checks = [], []
+    monkeypatch.setattr(rc, "ensure_servers",
+                        lambda args: server_checks.append(len(executed)))
+    monkeypatch.setattr(rc, "run_step",
+                        lambda step, args: executed.append(step["name"]))
+    decisions = iter([("sdlg_t0.7", "mechanism contrast"), (None, "stop")])
+    analyst_calls = []
+    def fake_analyst(state, n, args):
+        analyst_calls.append((n, list(state["completed_specs"])))
+        return next(decisions)
+    monkeypatch.setattr(rc, "run_analyst", fake_analyst)
+    monkeypatch.setattr(sys, "argv", ["run_campaign.py", "--go", "--max-phases", "4"])
+
+    rc.main()
+
+    a_steps = [n for n in executed if n.startswith("strategy_t0.7/")]
+    s_steps = [n for n in executed if n.startswith("sdlg_t0.7/")]
+    # Phase A ran first, completely, before anything else.
+    assert executed[:len(a_steps)] == a_steps
+    assert a_steps == [s["name"] for s in rc.build_steps("strategy_t0.7")]
+    # The analyst was first consulted only AFTER Phase A completed.
+    assert analyst_calls[0] == (1, ["strategy_t0.7"])
+    # Its chosen spec ran fully; the second decision ("stop") ended the loop.
+    assert s_steps == [s["name"] for s in rc.build_steps("sdlg_t0.7")]
+    assert len(analyst_calls) == 2
+    # Server preflight fired once per agent-run step (2 per spec), never for
+    # eval/metrics/audit/sweep steps.
+    assert len(server_checks) == 4
+    # Persisted state records completion in execution order.
+    with open(rc.STATE_PATH, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    assert state["completed_specs"] == ["strategy_t0.7", "sdlg_t0.7"]
+    assert [p["spec"] for p in state["phase_log"]] == ["strategy_t0.7", "sdlg_t0.7"]
+    assert all(p["status"] == "completed" for p in state["phase_log"])
+
+
+def test_campaign_resume_skips_completed_phase_a(monkeypatch, tmp_path):
+    """--resume with Phase A already complete must not re-run it (the FIRST
+    completed Phase A run is the confirmatory dataset, R6.5)."""
+    _patch_campaign_paths(monkeypatch, tmp_path)
+    os.makedirs(rc.CAMPAIGN_DIR, exist_ok=True)
+    with open(rc.STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"started_ts": time.time(), "started": "x",
+                   "completed_specs": ["strategy_t0.7"], "phase_log": []}, f)
+    executed = []
+    monkeypatch.setattr(rc, "ensure_servers", lambda args: None)
+    monkeypatch.setattr(rc, "run_step",
+                        lambda step, args: executed.append(step["name"]))
+    monkeypatch.setattr(rc, "run_analyst", lambda state, n, args: (None, "stop"))
+    monkeypatch.setattr(sys, "argv", ["run_campaign.py", "--go", "--resume"])
+
+    rc.main()
+
+    assert executed == []  # nothing re-ran; analyst said stop immediately
+
+
+def test_campaign_stop_file_aborts_before_any_step(monkeypatch, tmp_path):
+    _patch_campaign_paths(monkeypatch, tmp_path)
+    os.makedirs(rc.DECISIONS_DIR, exist_ok=True)
+    with open(rc.STOP_FILE, "w", encoding="utf-8") as f:
+        f.write("halt")
+    executed = []
+    monkeypatch.setattr(rc, "ensure_servers", lambda args: None)
+    monkeypatch.setattr(rc, "run_step",
+                        lambda step, args: executed.append(step["name"]))
+    monkeypatch.setattr(sys, "argv", ["run_campaign.py", "--go"])
+    with pytest.raises(SystemExit):
+        rc.main()
+    assert executed == []
+
+
+def test_stale_decision_file_never_read_as_fresh(monkeypatch, tmp_path):
+    """Resume restarts decision numbering at 1; a stale decision_01.json from
+    an interrupted campaign must be archived, not validated as if this
+    analyst call wrote it (it could re-run a spec nobody just chose)."""
+    monkeypatch.setattr(rc, "PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(rc, "DECISIONS_DIR", str(tmp_path / "campaign_decisions"))
+    monkeypatch.setattr(rc, "CAMPAIGN_DIR", str(tmp_path / "results" / "campaign"))
+    stale = tmp_path / "campaign_decisions" / "decision_01.json"
+    os.makedirs(stale.parent, exist_ok=True)
+    stale.write_text('{"choice": "strategy_t1.0", "rationale": "stale"}',
+                     encoding="utf-8")
+
+    class _FakeProc:
+        returncode = 0
+        stdout = ""
+    # Analyst subprocess runs but writes NO decision file.
+    monkeypatch.setattr(rc.subprocess, "run",
+                        lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(rc.shutil, "which", lambda name: "claude")
+
+    class _A:
+        analyst_model = "claude-fable-5"
+    choice, why = rc.run_analyst(_state(completed=["strategy_t0.7"]), 1, _A())
+    assert choice is None and "no decision file" in why
+    assert not stale.exists()                      # archived, not consumed
+    assert (stale.parent / "decision_01.json.superseded").exists()

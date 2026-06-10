@@ -13,10 +13,12 @@ confirmatory dataset is the FIRST completed Phase A run — a later repeat
 (strategy_t0.7_seed2) estimates sampling variance and can never replace or pool
 into the primary. Decision files (campaign_decisions/decision_*.json) are
 checked-in artifacts; the adaptive exploratory selection is disclosed in
-RESULTS.md §6.
+RESULTS.md §2.2.
 
 Phase A (confirmatory, always first — the pre-registered primary endpoint):
-  1. strategy arm  @ T=0.7, greedy clustering, tau=0 superset run
+  1. strategy arm  @ T=0.7, greedy clustering, tau=0 superset run (T and tau
+     both passed EXPLICITLY on the command line — the confirmatory cell is
+     defined by (T, tau) and neither may ride on a config default, R2.4)
   2. per-trajectory SWE-bench eval of the treatment
   3. matched-k vanilla control @ T=0.7 (k read from the treatment's metadata)
   4. per-trajectory eval of the control
@@ -128,9 +130,15 @@ def build_steps(key: str) -> list[dict]:
                  "--results-dir", d["treatment"],
                  "--clustering-strategy", spec["clustering"],
                  "--temperature", str(t),
+                 # tau=0 superset run pinned EXPLICITLY (R2.4-class): the whole
+                 # post-hoc tau ablation (R3.3) and the "superset" framing rest
+                 # on this value, so it must not ride on a config default that
+                 # an edit could silently change between cells.
+                 "--entropy-threshold", "0",
                  "--diversity-method", spec["arm"],
                  "--skip-existing"],
-         "timeout": 10 * 3600},
+         "timeout": 10 * 3600,
+         "needs_servers": True},
         {"name": f"{key}/treatment_eval", "eval_dir": d["treatment"],
          "timeout": 8 * 3600},
         {"name": f"{key}/control_run",
@@ -138,7 +146,8 @@ def build_steps(key: str) -> list[dict]:
                  "--treatment-dir", d["treatment"],
                  "--results-dir", d["control_base"],
                  "--temperatures", str(t), "--skip-existing"],
-         "timeout": 16 * 3600},
+         "timeout": 16 * 3600,
+         "needs_servers": True},
         {"name": f"{key}/control_eval", "eval_dir": d["control"],
          "timeout": 8 * 3600},
         {"name": f"{key}/metrics",
@@ -328,6 +337,13 @@ def run_analyst(state: dict, n: int, args) -> tuple[str | None, str]:
     os.makedirs(DECISIONS_DIR, exist_ok=True)
     decision_rel = f"campaign_decisions/decision_{n:02d}.json"
     decision_abs = os.path.join(PROJECT_ROOT, decision_rel)
+    if os.path.isfile(decision_abs):
+        # Resume restarts numbering at 1, so a decision file from an earlier
+        # (interrupted) campaign can already sit at this path. If THIS analyst
+        # call then failed to write, the stale file would be read as its
+        # output and the campaign would execute a choice nobody just made —
+        # archive it first so only a freshly written file is ever validated.
+        os.replace(decision_abs, decision_abs + ".superseded")
     exe = shutil.which("claude")
     if not exe:
         return None, "claude CLI not found — stopping (campaign keeps Phase A results)"
@@ -535,7 +551,12 @@ def run_spec(key: str, state: dict, args) -> None:
             entry["status"] = f"aborted ({why})"
             save_state(state)
             raise SystemExit(f"guardrail stop: {why}")
-        ensure_servers(args)
+        # Only the agent runs need vLLM/NLI; evals need Docker only, and the
+        # metrics/audit/sweep steps are pure post-processing. Requiring the
+        # servers for those would let a dead vLLM container block metrics that
+        # are computable from artifacts already on disk.
+        if step.get("needs_servers"):
+            ensure_servers(args)
         run_step(step, args)
     entry["status"] = "completed"
     entry["finished"] = datetime.now().isoformat(timespec="seconds")

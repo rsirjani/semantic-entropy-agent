@@ -183,7 +183,12 @@ deviation from a paper is intentional and documented (not a bug).
   Vanilla MUST sample at T>0 (temp=0 = deterministic = a strawman). The documented
   reproduction commands must set the temperature **explicitly on both arms** (a
   treatment command that silently inherits a different config default than the
-  control's CLI temperature is an R2.4 violation). Arms are compared only at equal
+  control's CLI temperature is an R2.4 violation). The same explicitness applies
+  to the entropy-gate τ on the treatment arms: the confirmatory cell is defined
+  by (T, τ), and the τ=0 superset premise underlying the post-hoc τ ablation
+  (R3.3) must be pinned explicitly in the documented and campaign-driver
+  commands (`--entropy-threshold 0`), never inherited from a config default.
+  Arms are compared only at equal
   T; additionally report ONE robustness row comparing the treatment against
   vanilla's *best* sweep temperature, so a win cannot be an artifact of comparing
   against vanilla at an unfavorable T (the knob touches the whole agent in the
