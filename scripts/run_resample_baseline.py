@@ -79,6 +79,20 @@ def discover_instances_and_k(treatment_dir: str, max_k: int | None) -> dict[str,
         if k <= 0:
             logger.warning(f"Skipping {name}: total_trajectories={k}")
             continue
+        # Consistency check: on a clean run with the current driver, the
+        # per-trajectory patch entries (one per genuine draw, R7.2) equal
+        # total_trajectories. A mismatch means an OLD-driver artifact (which
+        # dropped failed/patchless draws) or an interrupted run (leftover
+        # 'active' trajectories) — either way the treatment's predictions
+        # file does not count what total_trajectories counts, and the
+        # matched-k comparison would be built on inconsistent denominators.
+        n_rows = sum(1 for p in meta.get("patches", []) if p.get("trajectory_id"))
+        if n_rows and n_rows != k:
+            logger.warning(
+                f"{name}: metadata has {n_rows} per-trajectory patch entries but "
+                f"total_trajectories={k} — old-driver or interrupted treatment "
+                f"artifact; re-run the treatment instance with the current driver "
+                f"before using it for the matched-k baseline.")
         if max_k is not None:
             k = min(k, max_k)
         result[name] = k

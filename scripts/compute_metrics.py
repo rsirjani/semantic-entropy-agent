@@ -52,39 +52,58 @@ import numpy as np
 def load_predictions(path: str) -> dict[str, list[str]]:
     """instance_id -> list of trajectory patches (drops the duplicated 'primary').
 
-    Deduplicates by (instance_id, trajectory_id), keeping the LAST occurrence:
-    the resample driver appends to predictions_all_trajectories.jsonl, so a
-    re-run without --skip-existing would otherwise silently inflate n (and with
-    it every per-instance k, rarefaction denominator, and pairwise-distance
-    set) with stale duplicate rows.
+    Run-batch aware (see load_predictions_by_tid): only the LATEST run's rows
+    count, and within it the last occurrence per trajectory_id wins.
     """
     return {iid: list(by_tid.values())
             for iid, by_tid in load_predictions_by_tid(path).items()}
 
 
-def _iter_trajectory_predictions(path: str):
-    """Yield (instance_id, trajectory_id, patch) for genuine trajectory rows.
+def load_predictions_by_tid(path: str) -> dict[str, dict[str, str]]:
+    """instance_id -> {trajectory_id: patch}, restricted to the LATEST run.
 
-    The best-of duplicate ("primary") row carries no trajectory_id and is skipped
-    so it is never double-counted against the per-trajectory rows.
+    Mirrors eval_all_trajectories.load_latest_trajectories so the predictions
+    the metrics see are exactly the trajectories the eval record scores:
+
+    - Branching runs prepend a best-of "primary" row (no trajectory_id) per
+      run, so each instance's rows split into run-batches at those rows and
+      only the LAST batch counts. Keep-last-per-tid alone is NOT enough: a
+      re-run that produced FEWER trajectories (fewer clusters) would leave
+      the old run's orphan tids in the diversity pool, inflating n, the
+      rarefaction denominator, and the pairwise-distance set with stale
+      patches the eval record (correctly batch-split) never scores.
+    - The resample driver writes no primary rows (one batch); a re-run
+      without --skip-existing appends duplicate (iid, tid) rows, so within
+      the final batch the LAST occurrence per trajectory_id wins.
     """
+    rows_by_iid: dict[str, list[dict]] = {}
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             rec = json.loads(line)
+            rows_by_iid.setdefault(rec["instance_id"], []).append(rec)
+
+    out: dict[str, dict[str, str]] = {}
+    for iid, rows in rows_by_iid.items():
+        batches: list[list[dict]] = []
+        current: list[dict] = []
+        for rec in rows:
+            if rec.get("trajectory_id") in (None, "primary") and current:
+                batches.append(current)
+                current = []
+            current.append(rec)
+        if current:
+            batches.append(current)
+        by_tid: dict[str, str] = {}
+        for rec in batches[-1]:
             tid = rec.get("trajectory_id")
             if tid is None or tid == "primary":
                 continue
-            yield rec["instance_id"], tid, (rec.get("model_patch", "") or "")
-
-
-def load_predictions_by_tid(path: str) -> dict[str, dict[str, str]]:
-    """instance_id -> {trajectory_id: patch} for joining patches to eval outcomes."""
-    out: dict[str, dict[str, str]] = {}
-    for iid, traj_id, patch in _iter_trajectory_predictions(path):
-        out.setdefault(iid, {})[traj_id] = patch
+            by_tid[tid] = rec.get("model_patch", "") or ""
+        if by_tid:
+            out[iid] = by_tid
     return out
 
 

@@ -128,6 +128,39 @@ def build_env_config(config: dict, instance_id: str) -> dict:
     return env_config
 
 
+def build_predictions(instance_id: str, patches: list[dict],
+                      model_slug: str = "qwen3-coder-30b-a3b-awq-branching") -> list[dict]:
+    """Prediction rows for one instance: best-of 'primary' first, then ONE ROW
+    PER GENUINE TRAJECTORY — including failed/patchless draws as empty-patch
+    rows (R4.1/R7.2 predictions-record completeness).
+
+    The eval record (and with it the Chen estimator's n, the matched k*, and
+    the rarefaction denominator) is built from these rows. The vanilla
+    resample driver appends an empty row for every unproductive resample, so
+    omitting the treatment's unproductive draws here would asymmetrically
+    shrink the treatment's metric-time k — a pro-treatment bias the matched-k
+    design exists to prevent. The best-of pick considers only non-empty
+    patches (submitted first, then longest), matching the resample driver.
+    """
+    nonempty = [p for p in patches if p.get("patch")]
+    submitted = [p for p in nonempty if p.get("submitted")]
+    best = (submitted[0] if submitted
+            else max(nonempty, key=lambda p: len(p["patch"])) if nonempty else None)
+    predictions = [{
+        "instance_id": instance_id,
+        "model_name_or_path": model_slug,
+        "model_patch": best["patch"] if best else "",
+    }]
+    for p in patches:
+        predictions.append({
+            "instance_id": instance_id,
+            "model_name_or_path": f"{model_slug}-{p['trajectory_id']}",
+            "model_patch": p.get("patch") or "",
+            "trajectory_id": p["trajectory_id"],
+        })
+    return predictions
+
+
 def run_single_instance(
     instance: dict,
     config: dict,
@@ -191,34 +224,10 @@ def run_single_instance(
     for p in patches:
         print(f"    {p['trajectory_id']}: {len(p['patch'])} chars, submitted={p['submitted']}")
 
-    # Build prediction(s) for swebench eval
-    # Use the best patch: prefer submitted patches, then longest
-    predictions = []
-    if patches:
-        submitted = [p for p in patches if p["submitted"]]
-        best = submitted[0] if submitted else max(patches, key=lambda p: len(p["patch"]))
-        predictions.append({
-            "instance_id": instance_id,
-            "model_name_or_path": "qwen3-coder-30b-a3b-awq-branching",
-            "model_patch": best["patch"],
-        })
-
-        # Also save ALL patches as separate predictions for diversity analysis
-        for p in patches:
-            predictions.append({
-                "instance_id": instance_id,
-                "model_name_or_path": f"qwen3-coder-30b-a3b-awq-branching-{p['trajectory_id']}",
-                "model_patch": p["patch"],
-                "trajectory_id": p["trajectory_id"],
-            })
-    else:
-        predictions.append({
-            "instance_id": instance_id,
-            "model_name_or_path": "qwen3-coder-30b-a3b-awq-branching",
-            "model_patch": "",
-        })
-
-    return predictions
+    # Build prediction rows: best-of primary + one row per genuine trajectory
+    # (failed/patchless draws included as empty rows — R4.1/R7.2, see
+    # build_predictions).
+    return build_predictions(instance_id, patches)
 
 
 def main():

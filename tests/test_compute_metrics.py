@@ -190,6 +190,28 @@ def test_load_predictions_dedupes_rerun_appends(tmp_path):
     assert sorted(preds["i1"]) == ["B", "NEW"]   # 2 trajectories, last run0 wins
 
 
+def test_load_predictions_drops_orphan_tids_from_prior_branching_run(tmp_path):
+    """A branching re-run that produced FEWER trajectories (fewer clusters)
+    must not leave the old run's orphan tids in the diversity pool: the eval
+    driver scores only the LAST primary-delimited batch, so the predictions
+    loader must do the same — keep-last-per-tid alone would keep the stale
+    t0_strategy_2 patch, inflating n, the rarefaction denominator, and the
+    pairwise-distance set with a patch the eval record never scores."""
+    p = tmp_path / "orphan.jsonl"
+    _write_predictions(p, [
+        {"instance_id": "i1", "model_patch": "OLD_BEST"},                     # run 1 primary
+        {"instance_id": "i1", "model_patch": "OLD_A", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "OLD_B", "trajectory_id": "t0_strategy_1"},
+        {"instance_id": "i1", "model_patch": "OLD_C", "trajectory_id": "t0_strategy_2"},
+        {"instance_id": "i1", "model_patch": "NEW_BEST"},                     # run 2 primary
+        {"instance_id": "i1", "model_patch": "NEW_A", "trajectory_id": "t0"},
+        {"instance_id": "i1", "model_patch": "NEW_B", "trajectory_id": "t0_strategy_1"},
+    ])
+    by_tid = cm.load_predictions_by_tid(str(p))
+    assert by_tid["i1"] == {"t0": "NEW_A", "t0_strategy_1": "NEW_B"}
+    assert sorted(cm.load_predictions(str(p))["i1"]) == ["NEW_A", "NEW_B"]
+
+
 def test_selected_pass_at_1_flags_degenerate_tiebreak(tmp_path):
     """On the branching arm all signatures are typically unique by construction;
     the selector must DISCLOSE that 'majority' was a pure tie-break there."""

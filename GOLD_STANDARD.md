@@ -363,6 +363,20 @@ off-mode-recovery detection) is implemented and runnable over the artifacts. The
   results dir** (no hardcoded shared default — evaluating one arm must not be
   able to overwrite another arm's eval files), and every genuine trajectory of
   the run appears in the eval record (see R4.1 eval-record completeness).
+  **Predictions-record completeness (one layer up):** the eval record is built
+  from the per-trajectory predictions file, so the run drivers in EVERY arm
+  must write **one prediction row per genuine draw** — a trajectory that
+  failed or produced no diff still consumed budget and must appear as an
+  empty-patch row, exactly as the resample driver records its unproductive
+  resamples (a patch captured on a *failed* trajectory must likewise not be
+  discarded). Dropping an arm's own unproductive draws deflates that arm's
+  metric-time k and inflates its diverse-pass@k\* and rarefied-distinct levels
+  against the other arm. Post-hoc loaders must be **run-batch aware**: on a
+  re-run that produced fewer trajectories, rows from the superseded run must
+  not survive into the diversity pool (score only the last primary-delimited
+  batch, matching the eval driver), and the matched-k driver must warn when a
+  treatment metadata's per-trajectory entries disagree with its
+  `total_trajectories` (old-driver or interrupted artifact).
 - **R7.3** Figures/tables are regenerable from the predictions artifacts by a
   checked-in script.
 - **R7.4** Determinism knobs (seeds where applicable, model/temperature, package

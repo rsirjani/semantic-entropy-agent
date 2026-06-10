@@ -79,3 +79,83 @@ def test_matched_k_discovery(tmp_path):
     assert k_by_id == {"sympy__sympy-1": 5, "sympy__sympy-2": 9}
     capped = rb.discover_instances_and_k(str(tmp_path), max_k=6)
     assert capped == {"sympy__sympy-1": 5, "sympy__sympy-2": 6}
+
+
+def test_matched_k_discovery_warns_on_patch_row_mismatch(tmp_path, caplog):
+    """An old-driver/interrupted treatment artifact (patch entries !=
+    total_trajectories) must be flagged: its predictions file does not count
+    what total_trajectories counts, so the matched-k denominators disagree."""
+    import logging
+    import run_resample_baseline as rb
+    d = tmp_path / "sympy__sympy-3"
+    d.mkdir()
+    (d / "metadata.json").write_text(json.dumps({
+        "total_trajectories": 5,
+        "patches": [{"trajectory_id": f"t{i}", "patch": "x"} for i in range(2)],
+    }), encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        k_by_id = rb.discover_instances_and_k(str(tmp_path), max_k=None)
+    assert k_by_id == {"sympy__sympy-3": 5}      # k source unchanged
+    assert any("old-driver or interrupted" in r.message for r in caplog.records)
+
+
+def _fake_traj(tid, status, patch, submitted=False, step=7, parent=None):
+    import types
+    return types.SimpleNamespace(
+        trajectory_id=tid, status=status, patch=patch, submitted=submitted,
+        step=step, parent_id=parent, branch_info=None,
+    )
+
+
+def test_collect_patch_entries_one_entry_per_genuine_draw():
+    """R4.1/R7.2 predictions-record completeness at the PRODUCER: failed and
+    patchless trajectories are genuine draws (they consumed budget) and must
+    appear with patch "" — dropping them deflated the treatment's metric-time
+    k while the vanilla driver keeps empty rows for its failed resamples
+    (confirmed on the real pilot: 5/10 instances had patches < trajectories)."""
+    from src.agent.phased_orchestrator import collect_patch_entries
+    trajs = [
+        _fake_traj("t0", "completed", "PATCH_A", submitted=True),
+        _fake_traj("t0_strategy_1", "completed", ""),       # patchless draw
+        _fake_traj("t0_strategy_2", "failed", "PATCH_B"),   # captured on failure
+        _fake_traj("t0_strategy_3", "failed", None),        # failed, no patch
+        _fake_traj("t9", "active", "X"),                    # interrupted: not a draw
+        _fake_traj("t8", "branched", "Y"),                  # legacy parent: excluded
+    ]
+    entries = collect_patch_entries(trajs, {"t0": "strat A"})
+    by_tid = {e["trajectory_id"]: e for e in entries}
+    assert sorted(by_tid) == ["t0", "t0_strategy_1", "t0_strategy_2", "t0_strategy_3"]
+    assert by_tid["t0"]["patch"] == "PATCH_A" and by_tid["t0"]["strategy"] == "strat A"
+    assert by_tid["t0_strategy_1"]["patch"] == ""           # kept, normalized
+    assert by_tid["t0_strategy_2"]["patch"] == "PATCH_B"    # failed-but-captured kept
+    assert by_tid["t0_strategy_3"]["patch"] == ""           # None -> ""
+    assert by_tid["t0_strategy_2"]["status"] == "failed"
+
+
+def test_build_predictions_writes_a_row_for_every_draw():
+    import run_branching as rb
+    patches = [
+        {"trajectory_id": "t0", "patch": "AAAA", "submitted": False},
+        {"trajectory_id": "t0_strategy_1", "patch": "BB", "submitted": True},
+        {"trajectory_id": "t0_strategy_2", "patch": "", "submitted": False},
+    ]
+    preds = rb.build_predictions("i1", patches)
+    # Primary first (no trajectory_id), best = the SUBMITTED patch, not the longest.
+    assert "trajectory_id" not in preds[0] and preds[0]["model_patch"] == "BB"
+    rows = {p["trajectory_id"]: p["model_patch"] for p in preds[1:]}
+    assert rows == {"t0": "AAAA", "t0_strategy_1": "BB", "t0_strategy_2": ""}
+
+
+def test_build_predictions_all_empty_and_none():
+    import run_branching as rb
+    # All draws patchless: rows still exist (failed draws), primary is "".
+    preds = rb.build_predictions("i1", [
+        {"trajectory_id": "t0", "patch": "", "submitted": False},
+        {"trajectory_id": "t0_strategy_1", "patch": "", "submitted": False},
+    ])
+    assert preds[0]["model_patch"] == ""
+    assert [p["trajectory_id"] for p in preds[1:]] == ["t0", "t0_strategy_1"]
+    assert all(p["model_patch"] == "" for p in preds)
+    # Zero trajectories (catastrophic instance failure): bare primary only.
+    only = rb.build_predictions("i1", [])
+    assert len(only) == 1 and only[0]["model_patch"] == ""

@@ -49,6 +49,43 @@ from src.utils.tracer import PipelineTracer
 logger = logging.getLogger(__name__)
 
 
+def collect_patch_entries(trajectories, strategies_by_tid: dict) -> list[dict]:
+    """One patch entry per GENUINE DRAW — every trajectory that consumed agent
+    budget (status 'completed' OR 'failed'), in creation order, with patch ""
+    when none was captured.
+
+    Metric-correctness contract (R4.1/R7.2, predictions-record completeness):
+    the per-trajectory predictions file is built from these entries, and the
+    eval record's (n, c) is built from the predictions — so a draw that is
+    dropped HERE vanishes from the arm's matched-k denominator. The vanilla
+    resample driver writes an empty-patch row for every failed/unproductive
+    resample; dropping the treatment's failed/patchless trajectories (the old
+    behavior: only completed trajectories with non-empty patches) would
+    asymmetrically deflate the treatment's k and inflate its diverse-pass@k*
+    and rarefied-distinct numbers at metric time. It also silently discarded
+    real patches captured on 'failed' trajectories (silent data loss, R7.2).
+
+    Excluded statuses: 'active' (an interrupted run — not a finished draw; the
+    run is incomplete and must be re-run, not scored) and 'branched' (a legacy
+    branching_orchestrator parent whose budget continues in its children).
+    """
+    entries = []
+    for traj in trajectories:
+        if traj.status not in ("completed", "failed"):
+            continue
+        entries.append({
+            "trajectory_id": traj.trajectory_id,
+            "patch": traj.patch or "",
+            "submitted": traj.submitted,
+            "status": traj.status,
+            "steps": traj.step,
+            "parent_id": traj.parent_id,
+            "strategy": strategies_by_tid.get(traj.trajectory_id, ""),
+            "branch_info": traj.branch_info,
+        })
+    return entries
+
+
 class PhasedOrchestrator:
     """Orchestrates multi-trajectory agent with strategy-level branching."""
 
@@ -1458,19 +1495,11 @@ class PhasedOrchestrator:
 
     def _collect_results(self, elapsed: float, total_steps: int) -> dict:
         completed = self.manager.completed_trajectories
-        patches = []
-        for traj in completed:
-            if traj.patch:
-                patch_entry = {
-                    "trajectory_id": traj.trajectory_id,
-                    "patch": traj.patch,
-                    "submitted": traj.submitted,
-                    "steps": traj.step,
-                    "parent_id": traj.parent_id,
-                    "strategy": self.trajectory_strategies.get(traj.trajectory_id, ""),
-                    "branch_info": traj.branch_info,
-                }
-                patches.append(patch_entry)
+        # One entry per genuine draw (completed OR failed; patch may be "") —
+        # see collect_patch_entries for the metric-correctness contract.
+        patches = collect_patch_entries(
+            self.manager.trajectories.values(), self.trajectory_strategies,
+        )
 
         results = {
             "instance_id": self.instance_id,

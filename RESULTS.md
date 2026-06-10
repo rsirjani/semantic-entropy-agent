@@ -258,6 +258,28 @@ All metrics are pure post-processing over the predictions/eval artifacts
   driver and the metric loaders both keep the **last** occurrence per
   (instance, trajectory), and entropy/partition parsers read the **last**
   `STRATEGY PROPOSAL` block of the append-mode decisions log.
+- **Predictions-record completeness (the contract one layer up).** The eval
+  record is built *from* `predictions_all_trajectories.jsonl`, so completeness
+  must hold there too: the branching driver writes **one prediction row per
+  genuine trajectory — including failed and patchless draws as empty-patch
+  rows** (`run_branching.build_predictions`,
+  `phased_orchestrator.collect_patch_entries`), exactly as the resample driver
+  writes an empty row for every unproductive resample. Before this fix the
+  treatment driver silently dropped trajectories that failed or produced no
+  diff (on the real pilot, 5 of 10 instances had fewer prediction rows than
+  trajectories), which would have deflated the treatment's metric-time k —
+  e.g. a treatment with 1 pass among 5 draws but only 2 recorded rows scores
+  pass@k\*(2,1)=1.0 against vanilla's pass@2(5,1)=0.4, a +0.6 "gain"
+  manufactured entirely by dropping the treatment's own duds — and made the
+  `nonempty_patch_fraction` diagnostic structurally ≈1.0 for the treatment arm
+  (its empty draws never reached the artifact). Both arms now count
+  unproductive draws identically; run-loop failures are failed draws in both.
+  The metric loaders are run-batch aware: a branching **re-run that produces
+  fewer trajectories** cannot leave the prior run's orphan rows in the
+  diversity pool (`load_predictions_by_tid` scores only the last
+  primary-delimited batch, mirroring the eval driver), and the resample driver
+  warns when a treatment `metadata.json`'s patch entries disagree with
+  `total_trajectories` (old-driver or interrupted artifact).
 
 - **Coverage — `diverse-pass@k`** via the **unbiased Chen et al. (2021)** estimator on
   *both* arms at matched k. Framed honestly as an **oracle upper bound**, not
@@ -476,7 +498,19 @@ breakdown, are emitted by the same command into the `comparison` block of the ou
     (R5.2) and off-mode records (R5.4) are reported as descriptive evidence with both
     arms' (k, n_resolved) attached, and off-mode claims require replication across
     temperatures before being asserted.
-11. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
+11. **Gate-signal saturation.** In the pilot run every instance's five strategy
+   proposals clustered **all-singleton** (entropy = ln 5 ≈ 1.609, the maximum of
+   the achievable grid), so the τ gate was degenerate there: any τ < ln 5 means
+   always-branch, and the entropy signal carries information only if the NLI
+   clustering actually merges some intent summaries at the configured
+   entailment threshold (0.5). *Measured, not assumed:* the τ sweep reports
+   every instance's realized partition and the achievable grid, so saturation
+   is visible in the artifacts. If the pre-registered runs reproduce it, the
+   paper reports the gate as uninformative at this substrate/threshold — a
+   negative finding about the adaptive gate, not a license to retune τ or the
+   entailment threshold post-hoc (any retuned configuration is a new,
+   exploratory cell).
+12. **Uncontrolled rival baselines.** (a) *In-context regeneration:* NoveltyBench
    (Fig. 5) shows prompting "give me a different answer" with prior answers in
    context recovers much diversity in open-ended NL. We do not run this arm;
    defenses: our setting is multi-turn and action-constrained, the strategy-proposal
