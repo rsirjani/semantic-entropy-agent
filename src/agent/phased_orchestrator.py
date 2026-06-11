@@ -153,6 +153,12 @@ class PhasedOrchestrator:
         # Parameters
         self.max_trajectories = cfg(branching_config, "max_trajectories")
         self.max_steps = agent_config.get("step_limit", 250)
+        # SDLG tree: NL strategy-description of every surviving branch, for the
+        # per-turn distinct-vs-all-live-branches pruning (recursive SDLG arm).
+        self._live_descriptions: dict[str, str] = {}
+        self._sdlg_tree_active = False        # set True only inside _run_sdlg_tree
+        self._sdlg_pending_forks: list = []   # forks created during a branch's run
+        self._sdlg_fork_counter = 1
         self.max_search_steps = cfg(branching_config, "max_search_steps")
         self.min_search_steps = cfg(branching_config, "min_search_steps")
         self.patch_read_budget = cfg(branching_config, "patch_read_budget")
@@ -327,13 +333,23 @@ class PhasedOrchestrator:
             import gc
             gc.collect()
 
-            # === Phase 3+4: PATCH + VERIFY (LAZY SEQUENTIAL) ===
+            # === SDLG ARM: recursive per-turn semantic tree ===
+            # The sdlg arm branches at EVERY solution turn (single highest-score
+            # substitution → distinct-vs-all-live → fork/prune, cap 30), so it
+            # has its own worklist executor instead of the strategy loop.
+            if root.status == "active" and self.sdlg_enabled:
+                logger.info("=== SDLG RECURSIVE TREE (per-turn branching) ===")
+                total_steps += self._run_sdlg_tree(root)
+                unique_strategies = []  # tree drives its own execution below
+
+            # === Phase 3+4: PATCH + VERIFY (LAZY SEQUENTIAL) — strategy/none arms ===
             # Create ONE container at a time. Run to completion. Destroy. Next.
             # Only 1 SWE-bench container exists alongside vLLM at any point.
-            if not unique_strategies:
+            if not self.sdlg_enabled and not unique_strategies:
                 unique_strategies = ["Fix the bug as described in the problem statement."]
 
-            logger.info(f"=== PATCH/VERIFY PHASE ({len(unique_strategies)} strategies, lazy sequential) ===")
+            if unique_strategies:
+                logger.info(f"=== PATCH/VERIFY PHASE ({len(unique_strategies)} strategies, lazy sequential) ===")
 
             for i, strategy in enumerate(unique_strategies):
                 traj_id = "t0" if i == 0 else f"t0_strategy_{i}"
@@ -954,22 +970,14 @@ class PhasedOrchestrator:
         elif is_write_cmd:
             setattr(traj, "_patch_read_steps", 0)  # Reset on write
 
-        # --- SDLG diversification (if enabled) ---
-        if self.sdlg_enabled:
-            sdlg_already_applied = getattr(traj, "_sdlg_applied", False)
-
-            self.tracer.log(
-                "phase3.sdlg_check",
-                input={"action": action_cmd[:200], "is_write_command": is_write_cmd,
-                       "sdlg_already_applied": sdlg_already_applied,
-                       "can_branch": self.manager.can_branch(1)},
-                decision="TRIGGER_SDLG" if (is_write_cmd and not sdlg_already_applied and self.manager.can_branch(1)) else "SKIP_SDLG",
-                phase="PATCH", trajectory_id=traj.trajectory_id, step=traj.step,
-            )
-
-        if self.sdlg_enabled and is_write_cmd and not getattr(traj, "_sdlg_applied", False) and self.manager.can_branch(1):
-            setattr(traj, "_sdlg_applied", True)
-            sdlg_forks = self._apply_sdlg(traj, message, content)
+        # --- SDLG per-turn tree branching (user design: branch EVERY turn) ---
+        # Every PATCH turn, take the single highest-score reasoning substitution,
+        # keep the fork iff its NL strategy-description is distinct from all live
+        # branches, else prune (decisions 1-3). Replaces the one-shot "fork once
+        # at the first write" model; forks are queued and drained by
+        # _run_sdlg_tree so the tree grows and self-prunes recursively.
+        if self.sdlg_enabled and self._sdlg_tree_active and self.manager.can_branch(1):
+            self._sdlg_fork_per_turn(traj, message, content)
 
         # --- Execute greedy response ---
         self.tracer.log(
@@ -1031,6 +1039,119 @@ class PhasedOrchestrator:
         """
         return is_write_command(cmd)
 
+    def _sdlg_distinct_from_all(self, candidate_intent: str) -> tuple[bool, str | None]:
+        """Is `candidate_intent` semantically distinct from EVERY live branch?
+
+        The recursive SDLG arm keeps a fork iff its NL strategy-description does
+        NOT bidirectionally entail any already-surviving branch's description
+        (self._live_descriptions). Same rule and threshold as the clusterer
+        (`self.clusterer.threshold`), context="" (the prefix-saturation fix —
+        see _propose_strategies / diagnose_context_saturation.py). Empty
+        registry → distinct (the first branch). Returns (distinct, conflict_id):
+        conflict_id names the live branch it collapsed into, for the prune log.
+        """
+        thr = self.clusterer.threshold
+        if not candidate_intent or not candidate_intent.strip():
+            return False, "empty_intent"
+        for tid, desc in self._live_descriptions.items():
+            fwd = self.nli.classify(candidate_intent, desc)["entailment"]
+            bwd = self.nli.classify(desc, candidate_intent)["entailment"]
+            if fwd > thr and bwd > thr:
+                return False, tid  # bidirectional entailment → same strategy
+        return True, None
+
+    def _intent_of(self, response: str, traj: "Trajectory") -> str:
+        """One-sentence NL strategy-description of a candidate continuation.
+
+        Natural language (not raw code) is the substrate the entailment
+        clusterer is reliable on (R1.2; Wei 2026 finds NLI weak on code text),
+        and it is what the per-turn distinctness test compares (user design
+        point 9: we are diversifying STRATEGIES, expressed in NL)."""
+        try:
+            intents = self.intent_extractor.extract_batch_with_history(
+                [response], traj.agent.messages[:-1]
+            )
+            return (intents[0] if intents else "").strip()
+        except Exception as e:
+            logger.warning(f"intent extraction failed: {e}")
+            return ""
+
+    def _sdlg_fork_per_turn(
+        self, traj: "Trajectory", message: dict, content: str,
+    ) -> "Trajectory | None":
+        """Per-turn SDLG branch for the recursive tree (user decisions 1-3).
+
+        At THIS PATCH turn of `traj`: take the single highest-score reasoning
+        substitution (decision 1), extract its NL strategy-description, and keep
+        the fork IFF that description is semantically distinct from EVERY live
+        branch (decision 2); otherwise prune. Forks are cloned eagerly so they
+        snapshot the parent's container filesystem at this exact turn, and are
+        queued (self._sdlg_pending_forks) for the worklist. Cap 30 (decision 3)
+        via manager.can_branch. Returns the fork or None.
+        """
+        # Register this branch's own signature once, from its greedy intent, so
+        # its forks are tested against it (and the root gets a signature).
+        if traj.trajectory_id not in self._live_descriptions:
+            sig = self._intent_of(content, traj)
+            if sig:
+                self._live_descriptions[traj.trajectory_id] = sig
+
+        if not self.manager.can_branch(1):
+            return None
+
+        model_name = self.model_config.get("model_name", "openai/qwen3-coder")
+        model_kwargs = self.model_config.get("model_kwargs", {})
+        top = self.sdlg.top_thought_substitution(
+            model_name, model_kwargs, traj.agent.messages[:-1], content
+        )
+        if not top:
+            return None  # thought too short / ranking failed / no real divergence
+
+        cand_intent = self._intent_of(top["response"], traj)
+        if not cand_intent:
+            return None
+        distinct, conflict = self._sdlg_distinct_from_all(cand_intent)
+
+        if not distinct:
+            self.manager.branching_log.append({
+                "timestamp": time.time(), "event": "sdlg_prune",
+                "parent": traj.trajectory_id, "step": traj.step,
+                "candidate_intent": cand_intent[:200],
+                "collapsed_into": conflict,
+                "substitution": top["substitution"],
+            })
+            self.tracer.log(
+                "phase3.sdlg.per_turn_prune",
+                input={"candidate_intent": cand_intent[:200]},
+                decision=f"PRUNE_collapses_into_{conflict}",
+                phase="PATCH", trajectory_id=traj.trajectory_id, step=traj.step,
+            )
+            return None
+
+        idx = self._sdlg_fork_counter
+        self._sdlg_fork_counter += 1
+        fork = self._clone_for_sdlg(traj, top["response"], idx)
+        if fork is not None:
+            self._live_descriptions[fork.trajectory_id] = cand_intent
+            self._sdlg_pending_forks.append(fork)
+        self.manager.branching_log.append({
+            "timestamp": time.time(), "event": "sdlg_fork",
+            "parent": traj.trajectory_id, "step": traj.step,
+            "fork": fork.trajectory_id if fork else f"{traj.trajectory_id}_sdlg_{idx}",
+            "candidate_intent": cand_intent[:200],
+            "substitution": top["substitution"],
+            "n_live_branches": len(self._live_descriptions),
+        })
+        self.tracer.log(
+            "phase3.sdlg.per_turn_fork",
+            input={"candidate_intent": cand_intent[:200],
+                   "substitution": top["substitution"]},
+            output={"fork": fork.trajectory_id if fork else None},
+            decision="FORK_distinct", phase="PATCH",
+            trajectory_id=traj.trajectory_id, step=traj.step,
+        )
+        return fork
+
     def _veto_forbidden(self, traj: "Trajectory", action_cmd: str, phase: str) -> bool:
         """Block solution-leak commands (git history / network) in EVERY phase.
 
@@ -1065,6 +1186,78 @@ class PhasedOrchestrator:
         })
         self._log_step(traj, phase=phase, blocked=action_cmd[:100])
         return True
+
+    def _run_sdlg_tree(self, root: "Trajectory") -> int:
+        """Recursive per-turn SDLG tree (user design). Returns steps executed.
+
+        Worklist drain, depth-first execution (one container live at a time, the
+        VRAM constraint) but the tree, the per-turn forking, the
+        distinct-vs-all-live pruning, and the cap of 30 are exactly the design:
+        each branch runs to completion in its container; during its run,
+        `_step_patch` calls `_sdlg_fork_per_turn` every PATCH turn, which clones
+        a fork (snapshotting the container state at that turn) and queues it in
+        self._sdlg_pending_forks iff its strategy is distinct from all live
+        branches. After a branch finishes, its queued forks join the worklist
+        and themselves branch per-turn — so the tree grows and self-prunes until
+        the worklist empties or the cap is hit. Leaves = K semantically-distinct
+        finals.
+        """
+        # Reuse the orchestrator's intent extractor (built in __init__).
+        self._sdlg_tree_active = True
+        self._sdlg_pending_forks = []
+        self._sdlg_fork_counter = 1
+
+        # Root runs the greedy solution; generic patch prompt, no strategy.
+        self._inject_strategy_prompt(
+            root, "Fix the bug as described in the problem statement."
+        )
+        self.trajectory_phases[root.trajectory_id] = Phase.PATCH
+
+        total_steps = 0
+        worklist: list[Trajectory] = [root]
+        while worklist:
+            branch = worklist.pop(0)
+            logger.info(f"--- SDLG tree: running {branch.trajectory_id} "
+                        f"(live={len(self._live_descriptions)}, "
+                        f"queued={len(worklist)}) ---")
+            while branch.status == "active":
+                phase = self.trajectory_phases.get(branch.trajectory_id, Phase.PATCH)
+                try:
+                    if phase == Phase.PATCH:
+                        self._step_patch(branch)
+                    elif phase == Phase.VERIFY:
+                        self._step_verify(branch)
+                    total_steps += 1
+                except Exception as e:
+                    logger.error(f"Error in {branch.trajectory_id} step "
+                                 f"{branch.step}: {e}")
+                    branch.status = "failed"
+                if branch.step > self.max_steps:
+                    branch.status = "completed"
+                    break
+
+            self._capture_patch_if_missing(branch)
+            self.manager.save_all()
+            try:
+                branch.cleanup()
+            except Exception:
+                pass
+            logger.info(f"--- SDLG tree: finished {branch.trajectory_id} "
+                        f"status={branch.status} patch={len(branch.patch or '')}ch ---")
+
+            # Drain forks created during this branch's run into the worklist.
+            new_forks = [f for f in self._sdlg_pending_forks
+                         if f is not None and f.status == "active"]
+            self._sdlg_pending_forks = []
+            worklist.extend(new_forks)
+
+        self._sdlg_tree_active = False
+        self.manager.branching_log.append({
+            "timestamp": time.time(), "event": "sdlg_tree_complete",
+            "n_branches": len(self._live_descriptions),
+            "branch_ids": list(self._live_descriptions),
+        })
+        return total_steps
 
     def _apply_sdlg(
         self, traj: Trajectory, message: dict, greedy_content: str,
@@ -1387,10 +1580,15 @@ class PhasedOrchestrator:
         if self._veto_forbidden(traj, action_cmd, "VERIFY"):
             return
 
-        # --- SDLG in VERIFY (fallback, if enabled) ---
+        # --- SDLG in VERIFY (legacy one-shot fallback) ---
+        # Disabled in tree mode: the recursive tree branches only during the
+        # PATCH (solution-generation) phase, per the user design ("every turn of
+        # the solution part"). VERIFY is test/validation, not solution authoring.
         is_write_cmd = action_cmd and self._is_write_command(action_cmd)
 
-        if self.sdlg_enabled and is_write_cmd and not getattr(traj, "_sdlg_applied", False) and self.manager.can_branch(1):
+        if (self.sdlg_enabled and not self._sdlg_tree_active and is_write_cmd
+                and not getattr(traj, "_sdlg_applied", False)
+                and self.manager.can_branch(1)):
             self.tracer.log(
                 "phase4.sdlg_trigger",
                 input={"action": action_cmd[:200], "is_write_command": True},

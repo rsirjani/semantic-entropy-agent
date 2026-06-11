@@ -282,6 +282,56 @@ class SDLGGenerator:
 
         return alternatives
 
+    def top_thought_substitution(
+        self,
+        model_name: str,
+        model_kwargs: dict,
+        messages: list[dict],
+        greedy_response: str,
+    ) -> dict | None:
+        """Generate ONE alternative from the SINGLE highest-score thought
+        substitution (Aichberger Alg. 2 rank-1), for per-turn tree branching.
+
+        Unlike `generate` (which produces N alternatives at one branch point and
+        clusters them), this returns exactly the rank-1 (position, substitute)
+        by combined attribution x substitution x importance score, applied to
+        the REASONING only (R1.1 — never action tokens). Returns
+        {"response": <full alternative>, "substitution": {...}} or None if the
+        thought is too short, ranking fails, or the substitution reproduces the
+        greedy response (no real divergence). The caller tests the alternative's
+        intent for semantic distinctness before deciding to fork.
+        """
+        thought_text, _ = extract_thought_text(greedy_response)
+        if not thought_text or len(thought_text.split()) < 5:
+            return None
+        try:
+            ranked = self._rank_substitutions(
+                thought_text, model_name, model_kwargs, messages
+            )
+        except Exception as e:
+            logger.warning(f"SDLG top-1 ranking failed: {e}")
+            return None
+        if not ranked:
+            return None
+        top = ranked[0]  # highest combined_score (list is sorted desc)
+        alt = self._generate_thought_alternative(
+            top, thought_text, greedy_response, model_name, model_kwargs, messages
+        )
+        if not alt or alt == greedy_response:
+            return None
+        return {
+            "response": alt,
+            "substitution": {
+                "position": top.position,
+                "original": top.original_token,
+                "substitute": top.substitute_token,
+                "score": round(top.combined_score, 4),
+                "attribution": round(top.attribution, 4),
+                "substitution": round(top.substitution, 4),
+                "importance": round(top.importance, 4),
+            },
+        }
+
     def _rank_substitutions(
         self,
         target_text: str,
