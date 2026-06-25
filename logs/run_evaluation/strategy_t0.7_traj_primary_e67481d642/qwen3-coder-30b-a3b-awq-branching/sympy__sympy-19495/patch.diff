@@ -1,0 +1,32 @@
+diff --git a/sympy/sets/fancysets.py b/sympy/sets/fancysets.py
+index 1234567..89abcde 100644
+--- a/sympy/sets/fancysets.py
++++ b/sympy/sets/fancysets.py
+@@ -445,6 +445,25 @@ class ImageSet(Set):
+         # Use dummy symbols for ImageSet parameters so they don't match
+         # anything in other
+         rep = {v: Dummy(v.name) for v in variables}
+         variables = [v.subs(rep) for v in variables]
+         sig = sig.subs(rep)
+         expr = expr.subs(rep)
+ 
++    def _eval_subs(self, old, new):
++        """
++        Override _eval_subs to properly handle substitution in ImageSet.
++        
++        This ensures that when an ImageSet is used in contexts like 
++        ConditionSet, substitution operations behave correctly and don't
++        accidentally substitute the dummy variables.
++        """
++        # Handle substitution of the lambda function itself
++        if old == self.lamda:
++            return self.func(new, *self.base_sets)
++        # Handle substitution of lambda variables  
++        elif old in self.lamda.variables:
++            # Create a new ImageSet with updated lambda
++            new_lambda = self.lamda.subs(old, new)
++            return self.func(new_lambda, *self.base_sets)
++        # For other substitutions, delegate to parent class
++        else:
++            from sympy.core.basic import Basic
++            return Basic._eval_subs(self, old, new)

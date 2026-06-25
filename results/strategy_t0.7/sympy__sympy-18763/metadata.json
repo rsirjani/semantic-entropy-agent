@@ -1,0 +1,74 @@
+{
+  "instance_id": "sympy__sympy-18763",
+  "elapsed_seconds": 490.99815249443054,
+  "total_steps": 261,
+  "total_trajectories": 5,
+  "completed_trajectories": 5,
+  "submitted_trajectories": 5,
+  "patches": [
+    {
+      "trajectory_id": "t0",
+      "patch": "diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py\nindex 8743723ea0..3beedb86ed 100644\n--- a/sympy/printing/latex.py\n+++ b/sympy/printing/latex.py\n@@ -696,16 +696,21 @@ def _print_Derivative(self, expr):\n                                                   PRECEDENCE[\"Mul\"],\n                                                   strict=True))\n \n+\n     def _print_Subs(self, subs):\n         expr, old, new = subs.args\n         latex_expr = self._print(expr)\n+        # Check if expr is a simple arithmetic operation that needs parentheses\n+        from sympy.core.add import Add\n+        from sympy.core.mul import Mul\n+        if isinstance(expr, (Add, Mul)):\n+            latex_expr = r\"\\left(%s\\right)\" % latex_expr\n         latex_old = (self._print(e) for e in old)\n         latex_new = (self._print(e) for e in new)\n-        latex_subs = r'\\\\ '.join(\n-            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))\n-        return r'\\left. %s \\right|_{\\substack{ %s }}' % (latex_expr,\n+        latex_subs = r\"\\\\ \".join(\n+            e[0] + \"=\" + e[1] for e in zip(latex_old, latex_new))\n+        return r\"\\left. %s \\right|_{\\substack{ %s }}\" % (latex_expr,\n                                                          latex_subs)\n-\n     def _print_Integral(self, expr):\n         tex, symbols = \"\", []\n \n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 30,
+      "parent_id": null,
+      "strategy": "`/testbed/sympy/printing/latex.py` `_print_Subs` function \u2014 Wrap the expression in parentheses if it's a simple arithmetic expression: Modify the `_print_Subs` method to detect when `expr` represents a simple arithmetic operation and wrap it in parentheses before passing it to LaTeX formatting. ```python def _print_Subs(self, subs): expr, old, new = subs.args latex_expr = self._print(expr) # Check if expr is a simple arithmetic operation that needs parentheses if isinstance(expr, (Add, Mul)) and",
+      "branch_info": {}
+    },
+    {
+      "trajectory_id": "t0_strategy_1",
+      "patch": "The task requires modifying the LaTeX printer's Subs handling to properly parenthesize expressions. The actual fix needs to be implemented in sympy/printing/latex.py in the _print_Subs method by ensuring expressions like '-x+y' are wrapped in \\left(\\right) parentheses.\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 63,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/expr.py` `__mul__` method \u2014 Modify multiplication behavior to preserve parentheses context: Change how `Subs` objects are handled in multiplication operations to ensure proper grouping in the resulting expression tree. ```python # In the __mul__ method of the base Expr class or relevant subclass def __mul__(self, other): if isinstance(other, Subs): # Ensure proper precedence handling return Mul(self, other, evaluate=False) return super().__mul__(other) ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/expr.py` `__mul__` method \u2014 Modify multiplication behavior to preserve parentheses context: Change how `Subs` objects are handled in multiplication operations to ensure proper gro"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_2",
+      "patch": "--- a/sympy/printing/latex.py\n+++ b/sympy/printing/latex.py\n@@ -695,15 +695,25 @@ class LatexPrinter(ReprPrinter):\n         return r\"%s %s\" % (tex, self.parenthesize(expr.expr,\n                                                   PRECEDENCE[\"Mul\"],\n                                                   strict=True))\n\n+    def _print_Subs(self, subs):\n+        expr, old, new = subs.args\n+        latex_expr = self._print(expr)\n+        # Properly parenthesize complex expressions to ensure correct grouping\n+        # Check if expression is Add, Mul, or Pow to determine if parentheses needed\n+        if hasattr(expr, 'is_Add') or hasattr(expr, 'is_Mul') or hasattr(expr, 'is_Pow'):\n+            latex_expr = r\"\\\\left( %s \\\\right)\" % latex_expr\n+        latex_old = (self._print(e) for e in old)\n+        latex_new = (self._print(e) for e in new)\n+        latex_subs = r'\\\\\\\\ '.join(\n+            e[0] + '=' + e[1] for e in zip(latex_old, latex_new))\n+        return r'\\\\left. %s \\\\right|_{\\\\substack{ %s }}' % (latex_expr,\n+                                                         latex_subs)\n+\n     def _print_Integral(self, expr):\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 46,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/latex.py` `print_latex` function \u2014 Add global LaTeX formatting wrapper: Create a wrapper around the main LaTeX printing logic that applies additional formatting rules specifically for `Subs` expressions. ```python # At module level, add a wrapper function def _wrap_subs_latex(expr): if isinstance(expr, Subs): # Apply special formatting rules return r'\\left. \\left(%s\\right) \\right|_{\\substack{ %s }}' % ( print_latex(expr.args[0]), ' \\\\ '.join(f'{print_latex(a)}={print_lat",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/latex.py` `print_latex` function \u2014 Add global LaTeX formatting wrapper: Create a wrapper around the main LaTeX printing logic that applies additional formatting rules specific"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_3",
+      "patch": "diff --git a/sympy/core/function.py b/sympy/core/function.py\nindex 47e3a56ae8..e8501c7a64 100644\n--- a/sympy/core/function.py\n+++ b/sympy/core/function.py\n@@ -2205,6 +2205,20 @@ def mystr(expr, **settings):\n         obj._expr = expr.xreplace(dict(reps))\n         return obj\n \n+    def _latex(self, printer):\n+        expr, old, new = self.args\n+        latex_expr = printer._print(expr)\n+        # Wrap in parentheses if the expression is complex (Add, Mul, Pow, Div)\n+        from sympy import Add, Mul, Pow, Div\n+        if isinstance(expr, (Add, Mul, Pow, Div)):\n+            latex_expr = r\"\\\\left(%s\\\\right)\" % latex_expr\n+        latex_old = (printer._print(e) for e in old)\n+        latex_new = (printer._print(e) for e in new)\n+        latex_subs = r\"\\\\ \\\\ \".join(\n+            e[0] + \"=\" + e[1] for e in zip(latex_old, latex_new))\n+        return r\"\\\\left. %s \\\\right|_{\\\\substack{ %s }}\" % (latex_expr,\n+                                                         latex_subs)\n+\n     def _eval_is_commutative(self):\n         return self.expr.is_commutative\n \n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 75,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/core/expr.py` `Subs` class \u2014 Override the LaTeX representation method: Modify the `Subs` class itself to include a custom LaTeX representation that properly wraps expressions. ```python # In the Subs class definition def _latex(self, printer): expr, old, new = self.args latex_expr = printer._print(expr) # Always wrap in parentheses for complex expressions if isinstance(expr, (Add, Mul, Pow, Div)): latex_expr = r'\\left(%s\\right)' % latex_expr # rest of LaTeX formatting... ```",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/core/expr.py` `Subs` class \u2014 Override the LaTeX representation method: Modify the `Subs` class itself to include a custom LaTeX representation that properly wraps expressions. ```pytho"
+      }
+    },
+    {
+      "trajectory_id": "t0_strategy_4",
+      "patch": "diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py\nindex 8743723ea0..6511c9c7a2 100644\n--- a/sympy/printing/latex.py\n+++ b/sympy/printing/latex.py\n@@ -699,6 +699,11 @@ def _print_Derivative(self, expr):\n     def _print_Subs(self, subs):\n         expr, old, new = subs.args\n         latex_expr = self._print(expr)\n+        # Wrap in parentheses for complex expressions to avoid ambiguity\n+        # This fixes cases like 3*Subs(-x+y, (x,),(1,))\n+        if hasattr(expr, \"args\") and len(expr.args) > 1:\n+            # For compound expressions like Add, Mul, etc., wrap them\n+            latex_expr = r\"\\left(%s\\right)\" % latex_expr\n         latex_old = (self._print(e) for e in old)\n         latex_new = (self._print(e) for e in new)\n         latex_subs = r'\\\\ '.join(\n",
+      "submitted": true,
+      "status": "completed",
+      "steps": 47,
+      "parent_id": "t0",
+      "strategy": "`/testbed/sympy/printing/latex.py` `LatexPrinter` class \u2014 Extend the printer to use custom expression wrappers: Add a new method to the `LatexPrinter` class that detects when expressions should be wrapped in parentheses based on their type and content. ```python class LatexPrinter: def _print_Subs(self, subs): expr, old, new = subs.args latex_expr = self._print(expr) # Custom wrapping logic for Subs if self._should_wrap_expression(expr): latex_expr = r'\\left(%s\\right)' % latex_expr latex_old = (",
+      "branch_info": {
+        "type": "strategy",
+        "strategy": "`/testbed/sympy/printing/latex.py` `LatexPrinter` class \u2014 Extend the printer to use custom expression wrappers: Add a new method to the `LatexPrinter` class that detects when expressions should be wra"
+      }
+    }
+  ],
+  "branching_events": 0,
+  "strategies_proposed": 5
+}

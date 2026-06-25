@@ -26,10 +26,32 @@ logger = logging.getLogger(__name__)
 
 # --- Prompt templates ---
 
+# Focused-descriptor prompts. MEASURED 2026-06-11: bidirectional NLI entailment
+# scores same-strategy *narrative* summaries at ~0 (they pack different
+# incidental details per turn, so they do not entail) but scores same-strategy
+# *focused* descriptors at 0.89-0.98 and different strategies at ~0.01. So the
+# distinctness gate only discriminates if intents are stated as the CORE fix
+# strategy — target location + change — with NO narration. The output form is
+# pinned by example so two solutions that change the same thing in the same
+# place read almost identically.
+_FORMAT_RULES = """\
+State ONLY the core fix strategy, as a single concise sentence of the form
+"<change> in <file/function/class> [under <condition>]". Name the target
+location and what is changed. Do NOT narrate the agent ("the agent is...",
+"this trajectory...", "investigating...") — state the strategy itself. Two
+solutions that change the SAME thing in the SAME place must read almost
+identically; a genuinely different approach (different file, function, or
+mechanism) must read clearly differently.
+
+Example (good): "Skip imaginary-coordinate validation in Point.__new__ when evaluate is False."
+Example (bad):  "The AI agent is investigating how Point2D handles coordinates and pursuing a fix."\
+"""
+
 TRAJECTORY_WITH_CANDIDATE_PROMPT = """\
 An AI coding agent is fixing a bug. Below is its reasoning history so far, \
-followed by a proposed next step. Summarize the overall approach and strategy \
-in exactly one sentence — what fix is it pursuing and how?
+followed by a proposed next step.
+
+""" + _FORMAT_RULES + """
 
 History:
 {history}
@@ -37,16 +59,16 @@ History:
 Proposed next step:
 {candidate}
 
-One-sentence summary of the overall approach:"""
+Core fix strategy:"""
 
 TRAJECTORY_INTENT_PROMPT = """\
-An AI coding agent is fixing a bug. Below is its reasoning history. \
-Summarize the overall approach and current strategy in exactly one sentence — \
-what fix is it pursuing and how?
+An AI coding agent is fixing a bug. Below is its reasoning history.
+
+""" + _FORMAT_RULES + """
 
 {trajectory_summary}
 
-One-sentence summary of the overall approach:"""
+Core fix strategy:"""
 
 
 # --- Helpers ---

@@ -1,0 +1,202 @@
+2026-06-10 12:43:42,553 - INFO - Environment image sweb.env.py.x86_64.c795f4b88616b8462021ed:latest found for sympy__sympy-12481
+Building instance image sweb.eval.x86_64.sympy__sympy-12481:latest for sympy__sympy-12481
+2026-06-10 12:43:42,583 - INFO - Image sweb.eval.x86_64.sympy__sympy-12481:latest already exists, skipping build.
+2026-06-10 12:43:42,583 - INFO - Creating container for sympy__sympy-12481...
+2026-06-10 12:43:42,629 - INFO - Container for sympy__sympy-12481 created: 5f903a189d6d0a95c5f6833915c484cf4e3c385e396df1c37506372c28984783
+2026-06-10 12:43:42,847 - INFO - Container for sympy__sympy-12481 started: 5f903a189d6d0a95c5f6833915c484cf4e3c385e396df1c37506372c28984783
+2026-06-10 12:43:42,848 - INFO - Intermediate patch for sympy__sympy-12481 written to logs\run_evaluation\strategy_t0.7_traj_t0_strategy_1_643a0b4865\qwen3-coder-30b-a3b-awq-branching-t0_strategy_1\sympy__sympy-12481\patch.diff, now applying to container...
+2026-06-10 12:43:43,030 - INFO - >>>>> Applied Patch:
+/tmp/patch.diff:46: trailing whitespace.
+    
+/tmp/patch.diff:51: trailing whitespace.
+        
+/tmp/patch.diff:59: trailing whitespace.
+    
+/tmp/patch.diff:65: trailing whitespace.
+    
+/tmp/patch.diff:68: trailing whitespace.
+    
+Checking patch sympy/combinatorics/permutations.py...
+Applied patch sympy/combinatorics/permutations.py cleanly.
+warning: squelched 1 whitespace error
+warning: 6 lines add whitespace errors.
+
+2026-06-10 12:43:43,355 - INFO - Git diff before:
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 136ed5a478..2608cc3bbe 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -894,13 +894,27 @@ def __new__(cls, *args, **kwargs):
+         # for convenience in case one wants to enter permutations where
+         # counting starts from 1.
+ 
++        temp = flatten(args)
+         temp = flatten(args)
+         if has_dups(temp):
+             if is_cycle:
+-                raise ValueError('there were repeated elements; to resolve '
+-                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
++                # Handle non-disjoint cycles by composing them left-to-right
++                try:
++                    aform = _normalize_non_disjoint_cycles(args)
++                    # Continue with normal processing for the rest of the constructor
++                    if size and size > len(aform):
++                        aform.extend(list(range(len(aform), size)))
++                    size = len(aform)
++                    obj = Basic.__new__(cls, aform)
++                    obj._array_form = aform
++                    obj._size = size
++                    return obj
++                except Exception:
++                    raise ValueError("there were repeated elements; to resolve "
++                    "cycles use Cycle%s." % "".join([str(tuple(c)) for c in args]))
+             else:
+-                raise ValueError('there were repeated elements.')
++                raise ValueError("there were repeated elements.")
++        temp = set(temp)
+         temp = set(temp)
+ 
+         if not is_cycle and \
+@@ -2833,3 +2847,48 @@ def _merge(arr, temp, left, mid, right):
+ 
+ Perm = Permutation
+ _af_new = Perm._af_new
++
++def _normalize_non_disjoint_cycles(cycles):
++    """
++    Normalize non-disjoint cycles by composing them from left to right.
++    This handles cases like Permutation([[0,1],[0,1]]) which should
++    produce the identity permutation.
++    
++    Parameters
++    ----------
++    cycles : list of lists
++        List of cycles to compose
++        
++    Returns
++    -------
++    list
++        Array form of the composed permutation
++    """
++    if not cycles:
++        return []
++    
++    # Find the maximum element to determine the size
++    max_element = 0
++    for cycle in cycles:
++        if cycle:
++            max_element = max(max_element, max(cycle))
++    
++    # Initialize identity permutation
++    result = list(range(max_element + 1))
++    
++    # Apply cycles from left to right (composition order)
++    # Each cycle [a,b,c] means a->b, b->c, c->a
++    for cycle in cycles:
++        if not cycle:
++            continue
++        # Apply this cycle to the current result
++        new_result = result[:]
++        for i in range(len(cycle)):
++            new_result[cycle[i]] = cycle[(i + 1) % len(cycle)]
++        result = new_result
++    
++    return result
++
++
++# Make sure the function is accessible
++__all__ = ['Permutation', 'Cycle', '_normalize_non_disjoint_cycles']
+2026-06-10 12:43:43,356 - INFO - Eval script for sympy__sympy-12481 written to logs\run_evaluation\strategy_t0.7_traj_t0_strategy_1_643a0b4865\qwen3-coder-30b-a3b-awq-branching-t0_strategy_1\sympy__sympy-12481\eval.sh; copying to container...
+2026-06-10 12:43:46,260 - INFO - Test runtime: 2.82 seconds
+2026-06-10 12:43:46,261 - INFO - Test output for sympy__sympy-12481 written to logs\run_evaluation\strategy_t0.7_traj_t0_strategy_1_643a0b4865\qwen3-coder-30b-a3b-awq-branching-t0_strategy_1\sympy__sympy-12481\test_output.txt
+2026-06-10 12:43:46,346 - INFO - Git diff after:
+diff --git a/sympy/combinatorics/permutations.py b/sympy/combinatorics/permutations.py
+index 136ed5a478..2608cc3bbe 100644
+--- a/sympy/combinatorics/permutations.py
++++ b/sympy/combinatorics/permutations.py
+@@ -894,13 +894,27 @@ def __new__(cls, *args, **kwargs):
+         # for convenience in case one wants to enter permutations where
+         # counting starts from 1.
+ 
++        temp = flatten(args)
+         temp = flatten(args)
+         if has_dups(temp):
+             if is_cycle:
+-                raise ValueError('there were repeated elements; to resolve '
+-                'cycles use Cycle%s.' % ''.join([str(tuple(c)) for c in args]))
++                # Handle non-disjoint cycles by composing them left-to-right
++                try:
++                    aform = _normalize_non_disjoint_cycles(args)
++                    # Continue with normal processing for the rest of the constructor
++                    if size and size > len(aform):
++                        aform.extend(list(range(len(aform), size)))
++                    size = len(aform)
++                    obj = Basic.__new__(cls, aform)
++                    obj._array_form = aform
++                    obj._size = size
++                    return obj
++                except Exception:
++                    raise ValueError("there were repeated elements; to resolve "
++                    "cycles use Cycle%s." % "".join([str(tuple(c)) for c in args]))
+             else:
+-                raise ValueError('there were repeated elements.')
++                raise ValueError("there were repeated elements.")
++        temp = set(temp)
+         temp = set(temp)
+ 
+         if not is_cycle and \
+@@ -2833,3 +2847,48 @@ def _merge(arr, temp, left, mid, right):
+ 
+ Perm = Permutation
+ _af_new = Perm._af_new
++
++def _normalize_non_disjoint_cycles(cycles):
++    """
++    Normalize non-disjoint cycles by composing them from left to right.
++    This handles cases like Permutation([[0,1],[0,1]]) which should
++    produce the identity permutation.
++    
++    Parameters
++    ----------
++    cycles : list of lists
++        List of cycles to compose
++        
++    Returns
++    -------
++    list
++        Array form of the composed permutation
++    """
++    if not cycles:
++        return []
++    
++    # Find the maximum element to determine the size
++    max_element = 0
++    for cycle in cycles:
++        if cycle:
++            max_element = max(max_element, max(cycle))
++    
++    # Initialize identity permutation
++    result = list(range(max_element + 1))
++    
++    # Apply cycles from left to right (composition order)
++    # Each cycle [a,b,c] means a->b, b->c, c->a
++    for cycle in cycles:
++        if not cycle:
++            continue
++        # Apply this cycle to the current result
++        new_result = result[:]
++        for i in range(len(cycle)):
++            new_result[cycle[i]] = cycle[(i + 1) % len(cycle)]
++        result = new_result
++    
++    return result
++
++
++# Make sure the function is accessible
++__all__ = ['Permutation', 'Cycle', '_normalize_non_disjoint_cycles']
+2026-06-10 12:43:46,346 - INFO - Grading answer for sympy__sympy-12481...
+2026-06-10 12:43:46,357 - INFO - report: {'sympy__sympy-12481': {'patch_is_None': False, 'patch_exists': True, 'patch_successfully_applied': True, 'resolved': False, 'tests_status': {'FAIL_TO_PASS': {'success': [], 'failure': ['test_args']}, 'PASS_TO_PASS': {'success': ['test_Permutation', 'test_josephus', 'test_ranking', 'test_mul', 'test_Cycle', 'test_from_sequence', 'test_printing_cyclic'], 'failure': []}, 'FAIL_TO_FAIL': {'success': [], 'failure': []}, 'PASS_TO_FAIL': {'success': [], 'failure': []}}}}
+Result for sympy__sympy-12481: resolved: False
+2026-06-10 12:43:46,357 - INFO - Attempting to stop container sweb.eval.sympy__sympy-12481.strategy_t0.7_traj_t0_strategy_1_643a0b4865...
+2026-06-10 12:44:01,707 - INFO - Attempting to remove container sweb.eval.sympy__sympy-12481.strategy_t0.7_traj_t0_strategy_1_643a0b4865...
+2026-06-10 12:44:01,777 - INFO - Container sweb.eval.sympy__sympy-12481.strategy_t0.7_traj_t0_strategy_1_643a0b4865 removed.

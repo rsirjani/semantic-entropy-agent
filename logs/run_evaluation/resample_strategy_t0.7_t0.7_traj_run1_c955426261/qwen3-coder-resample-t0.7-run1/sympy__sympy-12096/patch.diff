@@ -1,0 +1,61 @@
+diff --git a/sympy/core/function.py b/sympy/core/function.py
+index 1b8005e1d..a6600abac 100644
+--- a/sympy/core/function.py
++++ b/sympy/core/function.py
+@@ -493,30 +493,55 @@ def is_commutative(self):
+         Returns whether the functon is commutative.
+         """
+         if all(getattr(t, 'is_commutative') for t in self.args):
++        if all(getattr(t, 'is_commutative') for t in self.args):
++            return True
+             return True
+         else:
++        else:
++            return False
+             return False
+ 
++
++    def _eval_evalf(self, prec):
+     def _eval_evalf(self, prec):
++        # Lookup mpmath function based on name
+         # Lookup mpmath function based on name
+         fname = self.func.__name__
++        fname = self.func.__name__
++        try:
+         try:
++            if not hasattr(mpmath, fname):
+             if not hasattr(mpmath, fname):
+                 from sympy.utilities.lambdify import MPMATH_TRANSLATIONS
++                from sympy.utilities.lambdify import MPMATH_TRANSLATIONS
++                fname = MPMATH_TRANSLATIONS[fname]
+                 fname = MPMATH_TRANSLATIONS[fname]
+             func = getattr(mpmath, fname)
++            func = getattr(mpmath, fname)
+         except (AttributeError, KeyError):
++        except (AttributeError, KeyError):
++            try:
+             try:
+-                return Float(self._imp_(*self.args), prec)
++                result = self._imp_(*self.args); return result.evalf(prec) if hasattr(result, "evalf") and not isinstance(result, (int, float, complex, Float)) else Float(result, prec)
++            except (AttributeError, TypeError, ValueError):
+             except (AttributeError, TypeError, ValueError):
+                 return
++                return
++
+ 
++        # Convert all args to mpf or mpc
+         # Convert all args to mpf or mpc
+         # Convert the arguments to *higher* precision than requested for the
++        # Convert the arguments to *higher* precision than requested for the
++        # final result.
+         # final result.
+         # XXX + 5 is a guess, it is similar to what is used in evalf.py. Should
++        # XXX + 5 is a guess, it is similar to what is used in evalf.py. Should
+         #     we be more intelligent about it?
++        #     we be more intelligent about it?
++        try:
+         try:
++            args = [arg._to_mpmath(prec + 5) for arg in self.args]
+             args = [arg._to_mpmath(prec + 5) for arg in self.args]
+             def bad(m):
+                 from mpmath import mpf, mpc

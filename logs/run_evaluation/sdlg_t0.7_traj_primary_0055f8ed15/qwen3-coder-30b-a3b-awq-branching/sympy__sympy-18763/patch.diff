@@ -1,0 +1,50 @@
+diff --git a/sympy/printing/latex.py b/sympy/printing/latex.py
+--- a/sympy/printing/latex.py
++++ b/sympy/printing/latex.py
+@@ -2450,6 +2450,25 @@ class LatexPrinter(Printer):
+         return r"\left\langle {} \right\rangle".format(",".join(
+             '{' + self._print(x) + '}' for [x] in m._module.gens))
+
++    def _print_Subs(self, expr):
++        """
++        Print Subs objects with proper parentheses around expressions.
++        This fixes the issue where expressions like -x+y in Subs objects
++        were not properly parenthesized in LaTeX output.
++        """
++        # Extract the components
++        expr_arg, old, new = expr.args
++        
++        # Convert the expression to LaTeX
++        expr_latex = self._print(expr_arg)
++        
++        # Check if we need to add parentheses around the expression
++        # Complex expressions should be parenthesized for clarity
++        from sympy.core.add import Add
++        from sympy.core.mul import Mul
++        from sympy.core.power import Pow
++        from sympy.core.symbol import Symbol
++        
++        # If the expression is a complex operation, wrap it in parentheses
++        # Only wrap if it's not a simple symbol
++        if isinstance(expr_arg, (Add, Mul, Pow)) and not isinstance(expr_arg, Symbol):
++            expr_latex = r"\\left(%s\\right)" % expr_latex
++            
++        # Format the substitution part properly
++        if isinstance(old, (tuple, list)):
++            if len(old) == 1:
++                old_str = self._print(old[0])
++                new_str = self._print(new[0])
++            else:
++                old_str = self._print(old)
++                new_str = self._print(new)
++        else:
++            old_str = self._print(old)
++            new_str = self._print(new)
++            
++        # Return properly formatted LaTeX with proper parentheses
++        return r"\\left. %s \\right|_{\\substack{ %s=%s }}" % (
++            expr_latex, old_str, new_str)
+
+     def _print_Quaternion(self, expr):
+         # TODO: This expression is potentially confusing,
+         # shall we print it as `Quaternion( ... )`?
