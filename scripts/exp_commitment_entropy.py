@@ -24,6 +24,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import time
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -44,6 +45,9 @@ from minisweagent.models.litellm_textbased import LitellmTextbasedModel
 from minisweagent.exceptions import LimitsExceeded, FormatError, InterruptAgentFlow, Submitted
 from src.agent.branching_agent import BranchingAgent
 from src.evaluation.dataset import load_swebench_instances
+from src.evaluation.behavioral_signature import (
+    behavioral_entropy, structural_signature, cluster_counts, discrete_entropy,
+)
 from run_branching import load_config, build_env_config, find_eval_image, reset_litellm_clients
 
 logging.basicConfig(level=logging.WARNING)
@@ -173,6 +177,65 @@ def semantic_entropy(patches, sim_thr=0.6):
 
 
 # --------------------------------------------------------------------------- #
+# Behavioral (execution-grounded) clustering -> the paper's PRIMARY relation.
+# Each continuation patch is evaluated; two patches share a class iff they induce
+# the same per-test outcome vector. Unlike mpnet/NLI text-similarity this is
+# checkable and model-free (Methods, contribution #2).
+# --------------------------------------------------------------------------- #
+
+def eval_patch_to_report(instance_id, model_name, patch, tid, run_id, timeout, temp_dir):
+    """Evaluate one patch via the SWE-bench harness; return its report record
+    (the inner ``{...}`` dict). Empty patches skip Docker and map to NO_PATCH;
+    a missing report (apply-failure / timeout) maps to APPLY_FAILED, so every
+    continuation lands in a behavioral class without a fabricated test verdict."""
+    if not patch or not patch.strip():
+        return {"patch_is_None": True, "patch_exists": False}
+    # Heavy import deferred so the module stays unit-testable without swebench.
+    from src.evaluation.run_eval import run_evaluation
+    pred = {"instance_id": instance_id, "model_name_or_path": model_name,
+            "model_patch": patch}
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False,
+                                     dir=temp_dir) as f:
+        f.write(json.dumps(pred) + "\n")
+        temp_path = f.name
+    try:
+        run_evaluation(predictions_path=temp_path, instance_ids=[instance_id],
+                       run_id=run_id, timeout=timeout)
+        report_path = os.path.join("logs", "run_evaluation", run_id,
+                                   model_name.replace("/", "__"), instance_id,
+                                   "report.json")
+        if os.path.exists(report_path):
+            with open(report_path) as rf:
+                report = json.load(rf)
+            return report.get(instance_id, report)
+        # No report => harness swallowed a patch-attributable error (apply/timeout).
+        return {"patch_exists": True, "patch_successfully_applied": False}
+    finally:
+        os.unlink(temp_path)
+
+
+def behavioral_entropy_of_patches(patches, instance_id, model_name, run_id,
+                                  timeout, temp_dir, miller_madow=True):
+    """Eval each patch -> behavioral signature -> discrete entropy (Miller-Madow).
+    Distinct eval run_id per patch so the harness's (run_id,model,instance) cache
+    cannot collapse two different patches onto one stale report."""
+    reports = []
+    for i, p in enumerate(patches):
+        reports.append(eval_patch_to_report(
+            instance_id, model_name, p, f"cont{i}",
+            f"{run_id}_c{i}", timeout, temp_dir))
+    return behavioral_entropy(reports, instance_id, miller_madow=miller_madow)
+
+
+def structural_entropy_of_patches(patches, miller_madow=True):
+    """Secondary, zero-GPU lens: cluster by structural signature (files+hunks)."""
+    sigs = [structural_signature(p) for p in patches]
+    out = discrete_entropy(cluster_counts(sigs), miller_madow=miller_madow)
+    out["clusters"] = cluster_counts(sigs)
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Main sweep
 # --------------------------------------------------------------------------- #
 
@@ -187,7 +250,19 @@ def main():
     ap.add_argument("--ref-temp", type=float, default=0.0, help="reference trajectory temp")
     ap.add_argument("--cont-temp", type=float, default=0.7, help="continuation temp")
     ap.add_argument("--max-steps", type=int, default=60)
-    ap.add_argument("--out", default="results/commitment")
+    ap.add_argument("--cluster", choices=["behavioral", "structural", "sts"],
+                    default="behavioral",
+                    help="meaning relation for outcome entropy. behavioral "
+                         "(paper primary: per-test outcome vector, needs Docker "
+                         "eval per continuation); structural (files+hunks, no "
+                         "GPU); sts (mpnet cosine, text-similarity ablation).")
+    ap.add_argument("--no-miller-madow", dest="miller_madow", action="store_false",
+                    help="disable the (K-1)/2M plug-in bias correction (on by default)")
+    ap.add_argument("--model-name", default=None,
+                    help="model_name_or_path slug for eval reports/run_id "
+                         "(default: config model.model_name)")
+    ap.add_argument("--eval-timeout", type=int, default=1800)
+    ap.set_defaults(miller_madow=True)
     args = ap.parse_args()
 
     reset_litellm_clients()
@@ -212,6 +287,10 @@ def main():
         logger.error("reference too short; aborting")
         return
 
+    model_name = args.model_name or config["model"]["model_name"]
+    temp_dir = os.path.join(PROJECT_ROOT, args.out, "_eval_tmp")
+    os.makedirs(temp_dir, exist_ok=True)
+
     # 2) Sweep prefix lengths; M continuations each.
     curve = []
     for frac in args.fractions:
@@ -228,17 +307,30 @@ def main():
                 env.cleanup()
             except Exception:
                 pass
-        H, clusters = semantic_entropy(patches)
-        Hmax = math.log(args.m)
-        curve.append({"fraction": frac, "k": k, "H": round(H, 4),
-                      "H_norm": round(H / Hmax, 4) if Hmax > 0 else 0.0,
-                      "clusters": sorted(clusters, reverse=True),
-                      "n_nonempty": sum(1 for p in patches if p.strip())})
-        logger.info(f"[{args.instance}] k={k}({frac:.2f})  H={H:.3f}  "
-                    f"clusters={sorted(clusters, reverse=True)}")
+
+        # Outcome entropy under the selected meaning relation.
+        if args.cluster == "behavioral":
+            ent = behavioral_entropy_of_patches(
+                patches, args.instance, model_name, run_id=f"commit_{args.instance}_k{k}",
+                timeout=args.eval_timeout, temp_dir=temp_dir,
+                miller_madow=args.miller_madow)
+        elif args.cluster == "structural":
+            ent = structural_entropy_of_patches(patches, miller_madow=args.miller_madow)
+        else:  # sts ablation
+            H, clusters = semantic_entropy(patches)
+            ent = discrete_entropy(clusters, miller_madow=args.miller_madow)
+            ent["clusters"] = sorted(clusters, reverse=True)
+
+        ent.update({"fraction": frac, "k": k, "cluster_method": args.cluster,
+                    "n_nonempty": sum(1 for p in patches if p.strip())})
+        curve.append(ent)
+        logger.info(f"[{args.instance}] k={k}({frac:.2f})  H={ent['H']:.3f} "
+                    f"H_mm={ent.get('H_mm', ent['H']):.3f}  clusters={ent.get('clusters')}")
 
     result = {"instance": args.instance, "ref_len": L, "m": args.m,
               "ref_temp": args.ref_temp, "cont_temp": args.cont_temp,
+              "cluster_method": args.cluster, "miller_madow": args.miller_madow,
+              "model_name": model_name,
               "elapsed_s": round(time.time() - t0, 1), "curve": curve}
     out_path = os.path.join(PROJECT_ROOT, args.out, f"Hk_{args.instance}.json")
     with open(out_path, "w", encoding="utf-8") as f:
