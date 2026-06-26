@@ -1233,4 +1233,63 @@ demonstrated.
 
 
 
+
+\subsection{Behavioral-signature instrument: specification and validity diagnostics}
+\label{sec:sigspec}
+The meaning relation of \S\ref{sec:instrument} is only as trustworthy as it is
+explicit, so we state it as a total deterministic algorithm and pre-register the
+diagnostics that audit it. Prior work on clustering code outputs converges on the
+same lesson---NLI/text-similarity clustering degrades on raw program text, and
+execution-/behavior-based equivalence is the principled substitute
+\citep{farquhar2024semantic,kuhn2023semantic}---which is exactly why we make the
+relation \emph{executed} and \emph{parsed} rather than learned.
+
+\paragraph{The signature map.}
+For a completion producing patch $P$ on instance $I$ with held-out suite
+$\mathcal{T}_I=\textsc{fail\_to\_pass}\cup\textsc{pass\_to\_pass}$, define
+\[
+\mathrm{sig}(P)=\big(\,\texttt{applies}(P),\ \texttt{compiles}(P),\ \mathbf{v}(P)\,\big),
+\qquad \mathbf{v}(P)\in\{\textsc{pass},\textsc{fail},\textsc{error}\}^{|\mathcal{T}_I|},
+\]
+computed by the procedure: (1) attempt \texttt{git apply}; if it fails, return the
+dedicated class $\bot_{\mathrm{apply}}$. (2) Else import/byte-compile the touched
+modules; if that fails, return $\bot_{\mathrm{compile}}$. (3) Else run every test in
+$\mathcal{T}_I$ in the isolated container and return the ordered outcome vector
+$\mathbf{v}(P)$ (tests in a fixed canonical order, optionally augmented by hashed
+outputs of declared differential inputs). Two patches share a meaning class iff they
+share $\mathrm{sig}(P)$; $\bot_{\mathrm{apply}}$ and $\bot_{\mathrm{compile}}$ are
+their own singleton classes. The map is \emph{total} (every completion lands in
+exactly one class), deterministic, and free of model judgment, so the partition can
+be recomputed and audited from stored artifacts alone. The optional structural
+refinement of \S\ref{sec:instrument} is applied \emph{within} a behavioral class by
+intersecting it with the (files, functions, hunks) signature parsed from $P$.
+
+\paragraph{Pre-registered instrument-validity diagnostics.}
+Naming a relation is not validating it; we therefore pre-register two diagnostics on
+the SymPy pilot, reported per instance before any commitment curve is interpreted.
+(i) The \emph{signature-collision rate} $\kappa$: among the distinct patch \emph{texts}
+sampled at a prefix, the fraction that share a signature with at least one other
+distinct text---$\kappa>0$ certifies that the instrument abstracts implementation
+detail (renamings, reordered independent edits, caller- vs.\ callee-side fixes
+collapse), whereas $\kappa\approx0$ means behavioral clustering has degenerated to
+text identity. (ii) The \emph{unresolved-singleton rate} $\sigma$: the fraction of
+completions that are alone in their class, which bounds how much of
+$\widehat H_{\mathrm{MM}}(\strat\mid\prefix)$ rests on un-clustered points. The
+directional prediction is $\kappa>0$ on a majority of multi-patch prefixes with
+$\sigma\lesssim0.6$; the sharp falsifier is $\kappa\approx0$ across the pilot, which
+would refute the use of behavioral signatures as a meaning-equivalence relation and
+force a coarser granularity (resolution-bit) or a richer differential probe.
+
+\paragraph{Status on the completed run.}
+The sole completed run is degenerate for both diagnostics. On \texttt{sympy-22714}
+($n\!=\!1$; $f^\ast=0$, $\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction)
+plain resampling recovered a \emph{single} behavioral class at every prefix, so the
+collision rate is trivially $\kappa=1$ over that one class and the singleton rate is
+$\sigma=0$: the algorithm ran end-to-end (patch $\to$ apply $\to$ compile $\to$
+outcome vector $\to$ class) and produced a well-defined finite class set, but with no
+second occupied class it exercises neither the abstraction claim ($\kappa>0$ over
+\emph{distinct} behaviors) nor the singleton bound. The instrument is thus
+\emph{specified and operational} but its discriminating validity stands
+pre-registered, not demonstrated, until an instance yields $\hat K\ge2$.
+
 \end{document}
