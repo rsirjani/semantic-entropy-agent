@@ -41,7 +41,7 @@ import copy
 import logging
 
 from minisweagent.environments.docker import DockerEnvironment
-from minisweagent.models.litellm_textbased import LitellmTextbasedModel
+from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
 from minisweagent.exceptions import LimitsExceeded, FormatError, InterruptAgentFlow, Submitted
 from src.agent.branching_agent import BranchingAgent
 from src.evaluation.dataset import load_swebench_instances
@@ -262,6 +262,7 @@ def main():
                     help="model_name_or_path slug for eval reports/run_id "
                          "(default: config model.model_name)")
     ap.add_argument("--eval-timeout", type=int, default=1800)
+    ap.add_argument("--out", default="results/commitment")
     ap.set_defaults(miller_madow=True)
     args = ap.parse_args()
 
