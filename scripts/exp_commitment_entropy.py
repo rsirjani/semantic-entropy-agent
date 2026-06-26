@@ -81,6 +81,7 @@ def make_agent(config, instance, temperature):
 def run_to_completion(agent, max_steps):
     """Greedy/sampled agent loop until submit / limit. Returns final patch."""
     steps = 0
+    submitted_patch = None
     while steps < max_steps:
         try:
             msg = agent.query_only()
@@ -88,7 +89,15 @@ def run_to_completion(agent, max_steps):
             break
         try:
             agent.execute_response(msg)
-        except Submitted:
+        except Submitted as e:
+            # The submitted patch lives in the exception (mirrors the working
+            # phased_orchestrator path); just breaking here would discard it and
+            # leave only the git-diff fallback -> empty patches.
+            try:
+                msgs = getattr(e, "messages", None) or []
+                submitted_patch = msgs[0].get("extra", {}).get("submission", "") if msgs else ""
+            except Exception:
+                submitted_patch = ""
             break
         except InterruptAgentFlow:
             pass
@@ -98,10 +107,12 @@ def run_to_completion(agent, max_steps):
         steps += 1
         if agent.is_finished():
             break
-    return capture_patch(agent)
+    return capture_patch(agent, submitted_patch)
 
 
-def capture_patch(agent):
+def capture_patch(agent, submitted_patch=None):
+    if submitted_patch and submitted_patch.strip():
+        return submitted_patch
     sub = agent.get_submission()
     if sub and sub.strip():
         return sub
