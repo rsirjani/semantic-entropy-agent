@@ -312,7 +312,53 @@ or embeddings, whereas ours are \emph{executed} behavioral signatures (the
 test-outcome vector a patch induces), giving a non-circular, non-learned meaning
 relation; they measure one curve under forced resampling, we separate the
 generator-collapse ($f^\ast$) and outcome-lock ($f^\dagger$) thresholds; and we turn
-the result into a test-time-compute policy (inject in $[f^\ast,f^\dagger)$). A
+the result into a test-time-compute policy (inject in $[f^\ast,f^\dagger)$). This
+separation is our central claim over a single survival function: we
+\emph{pre-register} that the window is non-empty---$f^\ast<f^\dagger$ strictly on a
+non-zero fraction of instances, the generator ceasing to explore before the outcome
+locks---and will report the per-instance gap $f^\dagger-f^\ast$ and the fraction of
+instances with a strictly positive window. The falsifier is sharp: if
+$f^\ast=f^\dagger$ on essentially every instance the window collapses to a point and
+the $f^\ast$/$f^\dagger$ distinction reduces to one curve $S(T)$. Beyond contrast,
+the relationship is a strict \emph{reduction}: restricting our interventional
+estimator to a single-step trajectory (with $k$ ranging over token positions of one
+generation and text-similarity in place of behavioral clustering) recovers exactly
+the object Bigelow detects---the change-point in the answer distribution that defines
+$S(T)$. Two foundations make this a generalization rather than an analogy: $f^\ast$
+references counterfactual resampled futures rather than the realized output
+(non-circularity, F11), which \emph{is} Bigelow's resample-and-detect construction in
+the single-step case; and the support-inclusion ordering yielding $f^\ast\le
+f^\dagger$ (F4) is what a single survival curve cannot express, since $S(T)$ collapses
+the two thresholds onto one axis. We therefore \emph{pre-register} the degenerate-case
+check: in the single-step, text-clustering limit our $f^\ast$ should localize collapse
+to the same prefix index (within sampling error) as the Bayesian change-point on the
+identical distribution, and a systematic mismatch would falsify the generalization
+claim and demote the relationship to mere analogy. The lone completed run does not
+instantiate this check---it is multi-step and behavioral, and degenerate at that
+($f^\ast=0$, $\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction, $n\!=\!1$ on
+\texttt{sympy-22714})---so the reduction stands pre-registered, not demonstrated. The two thresholds
+are not yet on equal evidentiary footing: the lone completed run fixes only $f^\ast$,
+and degenerately ($f^\ast=0$ at $n\!=\!1$; the Status section reads it as an honest
+null), while $f^\dagger$ awaits the forced-diverse reachable-support estimator, so the
+window claim is pre-registered, not tested. Because that lone run collapses to a
+single behavioral class ($\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction),
+it is consistent with \emph{both} a strictly positive window and the falsifier's
+$f^\ast=f^\dagger$ degeneracy; it therefore supplies no evidence separating our
+two-threshold account from a single survival curve $S(T)$, and the load-bearing
+novelty over~\citep{bigelow2024forking} stands entirely on the unrun forced-diverse
+estimator. To make the comparison concrete and falsifiable, we \emph{pre-register} a
+baseline arm that runs the Bigelow-style change-point/survival analysis on the
+final-patch token distribution \emph{within the terminal step alone} and overlays its
+located change-point on our cross-step $\widehat{H}(\strat\mid\prefix)$ curve,
+reporting the gap in \emph{resolved-entropy fraction} between the two commitment
+locators. We predict the single-turn locator lands strictly later (higher
+resolved-entropy fraction) than the cross-step $f^\ast$ on a majority
+($\geq\!70\%$) of instances---reading one step, it cannot see cross-step narrowing
+and so systematically under-locates commitment; the falsifier is per-instance
+coincidence of the two locators within one resolved-entropy bin on a majority of
+instances. The lone completed run cannot yet test this: with $f^\ast=0$ at the floor
+and $n\!=\!1$ (Status), the cross-step locator is degenerate and the overlay is
+uninformative, so the predicted gap stands pre-registered, not measured. A
 parallel training-time line finds that a sparse set of high-entropy
 ``forking''/``critical'' tokens decides reasoning
 direction~\citep{wang2025highentropy,lin2024critical} and trains models to branch at
@@ -407,6 +453,46 @@ realized increment $H(\strat\mid\tau_{:k-1})-H(\strat\mid\tau_{:k})$ can be
 \emph{negative}---a step that inspects code may reveal that several repairs are
 viable---so it is only an expectation-level proxy for $\ell_k$.
 
+\paragraph{Leverage is a conserved budget.}
+The same chain rule gives more than a per-step identity: summed over the
+trajectory the leverages telescope to the total resolvable outcome entropy,
+\begin{equation}
+\sum_{k=1}^{T}\ell_k \;=\; \sum_{k=1}^{T} I(A_k;\strat\mid\tau_{:k-1})
+\;=\; I(\tau;\strat) \;=\; H(\strat),
+\label{eq:conservation}
+\end{equation}
+the last equality because the patch $\strat$ is a deterministic function of the
+completed trajectory $\tau$, so $H(\strat\mid\tau)=0$~\citep{cover2006elements}.
+Each summand is non-negative, $\ell_k=I(A_k;\strat\mid\tau_{:k-1})\ge0$, so
+Eq.~\eqref{eq:conservation} partitions $H(\strat)$ into per-step shares that cannot
+cancel; equivalently $\mathbb{E}[H(\strat\mid\tau_{:k})]$ is non-increasing in $k$
+(conditioning cannot raise average entropy~\citep{cover2006elements}), so the
+resolved-entropy coordinate $\rho$ climbs monotonically in expectation to its
+ceiling $H(\strat)$ and the telescoping sum is guaranteed non-negative regardless of
+how leverage is distributed.
+Commitment is thus the allocation of a \emph{finite} budget $H(\strat)$ across
+steps, not a property of trajectory position: this is exactly what licenses the
+earlier claim that diversity pays at a few, possibly scattered, steps rather than
+over a contiguous window---a fixed total partitioned non-uniformly, not a quantity
+that accrues with depth. It is the agent-trajectory analogue of the
+transition-path-theory decomposition of reactive flux along the committor
+coordinate~\citep{evanden2010tpt}. We pre-register a GPU-free check of the
+estimator against this identity: a synthetic Monte-Carlo generator with known
+step-wise branching and closed-form $H(\strat)$, estimating each $\widehat\ell_k$
+from $M$ resampled continuations per prefix and testing whether
+$\sum_k\widehat\ell_k$ recovers $H(\strat)$ within the Miller--Madow band
+($+(\hat K-1)/2M$, Eq.~\eqref{eq:mm}); a systematic gap surviving the correction
+and exceeding the Monte-Carlo CI would refute the conservation identity and with it
+the finite-budget framing, while a markedly non-uniform recovered profile would
+corroborate the ``few scattered steps'' reading. This artifact is not yet produced.
+The sole completed run satisfies Eq.~\eqref{eq:conservation} only \emph{vacuously}:
+on the single degenerate instance ($f^\ast=0$, $\widehat{H}_{\mathrm{MM}}=0$ at
+every measured fraction, $n\!=\!1$; \S\ref{sec:protocol}) the outcome entropy is
+itself $H(\strat)=0$, so every $\ell_k=0$ and $\sum_k\widehat\ell_k=0=H(\strat)$
+holds with no occupied alternative class. It therefore exercises no non-trivial
+partition and supplies no evidence on how the budget is allocated; the conservation
+identity stands pre-registered, not tested.
+
 \paragraph{Two summary thresholds, stated honestly in support.}
 Two scalars bracket where injection can help. They are cleanest in terms of the
 \emph{support} of the outcome distribution (the classes with positive probability),
@@ -473,8 +559,27 @@ information itself---draw $R$ alternative actions
 $a_k^{(1)},\dots,a_k^{(R)}\sim\pi(\cdot\mid\tau_{:k-1})$, continue each $M$ times to
 outcome distributions $\hat p_r$, and form the Jensen--Shannon-type information
 $\widehat\ell_k = H\!\big(\tfrac1R\textstyle\sum_r \hat p_r\big)-\tfrac1R\sum_r
-H(\hat p_r)$. Plug-in entropies are biased low at small $M$; we apply the
-Miller--Madow correction and report $\log M$ as the ceiling. The estimator is
+H(\hat p_r)$. Plug-in entropies are biased low at small $M$ by approximately
+$(\hat K-1)/(2M)$ nats for $\hat K$ occupied classes; we therefore report the
+Miller--Madow-corrected estimate
+\begin{equation}
+\widehat H_{\mathrm{MM}}(\strat\mid\prefix)\;=\;\Hk+\frac{\hat K-1}{2M},
+\label{eq:mm}
+\end{equation}
+and treat $\log M$ as the achievable ceiling. Because the bias scales with
+$\hat K/M$, curves estimated at different realized $M$ are compared only after this
+correction and the ceiling-normalization of Eq.~\eqref{eq:estimator}; we never
+compare raw plug-in entropies across prefixes drawn at different $M$. We
+pre-register, in addition, a per-point \emph{paired} bootstrap confidence interval
+on each $\widehat H_{\mathrm{MM}}(\strat\mid\prefix)$, obtained by resampling the
+$M$ continuations with replacement ($B=2000$) and recomputing $\hat K$ and the
+correction on each replicate; the interval is reported alongside the $\log M$
+ceiling, and no reported entropy is permitted to exceed that ceiling. The correction
+re-levels a curve but leaves the \emph{location} of collapse unchanged---at a
+collapsed prefix $\hat K=1$ makes the term identically zero---so it shifts absolute
+entropy without moving the detected $f^\ast$. Whether the analytic term suffices at
+our operating $M$ is itself a pre-registered check (\S\ref{sec:replay}), not an
+assumption. The estimator is
 \textbf{non-circular} (it references only counterfactual continuations, never the
 realized final) and \textbf{interventional} (fixing $\prefix$ and resampling is a
 $\mathrm{do}(\cdot)$ on the prefix). It is monotone \textbf{only in expectation}:
@@ -508,6 +613,23 @@ prefix state; continuations then proceed by ordinary sampling at temperature $T$
 A single reference trajectory per problem (greedy decoding, $T=0$) defines the
 prefixes to be reconstructed.
 
+\paragraph{Pre-registered estimator validation (not yet run).}
+Before interpreting any commitment curve we will validate the bias correction of
+Eq.~\eqref{eq:mm} on \emph{synthetic} outcome distributions with a \emph{known}
+number of classes $K$ and known true entropy $H$: drawing $M\in\{5,10,20,40\}$
+samples per setting, we compare the raw plug-in and Miller--Madow-corrected
+estimators against the true $H$ with bootstrap confidence intervals and overlay the
+$\log M$ ceiling. The pre-registered acceptance criterion is that the corrected
+estimate falls within its bootstrap CI of the true $H$ for $M\ge20$; if it remains
+biased beyond that CI at $M=40$, or if applying the correction \emph{moves} a
+detected collapse location, the analytic $(K-1)/(2M)$ term is inadequate and we
+replace it with a jackknife/resampling estimator. This artifact is not yet produced.
+The sole completed run is the single degenerate instance below
+(\S\ref{sec:protocol}), which recovers one behavioral class ($\hat K=1$) and
+therefore makes the Miller--Madow term $(\hat K-1)/(2M)$ identically zero: it
+exercises the replay-and-clustering pipeline but \emph{not} the bias correction,
+whose adequacy remains unverified until an instance yields $\hat K\ge2$.
+
 \subsection{Meaning equivalence: behavioral and structural signatures}
 \label{sec:instrument}
 The entropy in Eq.~\eqref{eq:estimator} is taken over \emph{meaning classes}, so
@@ -515,10 +637,18 @@ it depends entirely on the relation that decides when two final patches mean the
 same thing. Because our outputs are executable, we take this relation to be
 \textbf{behavioral} as the principled primary: we run the patched repository
 against the instance's tests and assign each patch its \emph{behavioral
-signature}---the vector of per-test outcomes over the \textsc{fail\_to\_pass} and
+signature}---the vector of per-test outcomes (\textsc{pass}/\textsc{fail}/\textsc{error}
+per test) over the \textsc{fail\_to\_pass} and
 \textsc{pass\_to\_pass} tests, optionally augmented by hashed outputs of
 additional differential inputs. Two patches share a class iff they share a
-signature. This collapses behaviorally-equivalent patches that surface diffing
+signature. Patches that fail to apply or fail to compile produce no outcome
+vector; rather than discard them, we assign them an explicit, distinct
+\emph{non-applying} class, which makes the partition \emph{total} (every
+completion lands in exactly one class) and the instrument a complete deterministic
+algorithm---patch $\to$ apply $\to$ run held-out and \textsc{fail\_to\_pass} tests
+$\to$ outcome vector $\to$ class---with no learned text-similarity anywhere in the
+loop. The clustering thus reads only execution outcomes, never the branching
+signal it is used to study, so the measurement is non-circular by construction. This collapses behaviorally-equivalent patches that surface diffing
 over-counts (renamings, reordered independent edits, caller- vs.\ callee-side
 fixes) and separates near-identical patches that flip a test, and it is obtained
 essentially for free: the evaluation harness already executes these tests. One
@@ -644,7 +774,8 @@ $f^\ast=f^\dagger=$~trajectory-end. To date this axis is \emph{unfilled}: the so
 is the single-instance SymPy estimator check above (\texttt{sympy-22714},
 behavioral-signature clustering; $n=1$, $f^\ast=0$,
 $\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction $\{0,0.5,0.9\}$), which neither
-establishes nor refutes cross-repo generality---and, being degenerate, supplies no
+establishes nor refutes cross-repo generality; the panel therefore stands at zero
+non-SymPy repositories---and, being degenerate, supplies no
 nonzero SymPy baseline against which a second repository could be compared: with all
 $\ell_k=0$ the predicted leverage-concentration check (Gini of $\{\ell_k\}>0.5$) is
 undefined, and $f^\dagger$ awaits the forced-diverse reachable-support run.
@@ -682,7 +813,9 @@ primary curve.
 (i) \emph{Reference dependence}: $f^\ast$ conditions on one reference prefix per
 problem; we will quantify sensitivity by repeating with sampled references on a
 subset. (ii) \emph{Estimator bias and the leverage proxy}: small $M$ biases plug-in
-entropy low (we report Miller--Madow-corrected values and $\log M$ as the ceiling);
+entropy low (we report Miller--Madow-corrected values, Eq.~\eqref{eq:mm}, with
+$\log M$ as the ceiling, and pre-register the synthetic $K$-class validation of
+\S\ref{sec:replay});
 moreover the cheap increment $\Delta_k$ estimates per-step leverage only in
 expectation and can go negative along a single reference, so we treat it as a screen
 and confirm flagged steps with the direct nested estimate $\widehat\ell_k$. (iii)
@@ -722,7 +855,47 @@ across-rerun ARI is degenerate (undefined / vacuously $1$), so instrument
 reproducibility remains \emph{unverified}. The falsifier---signatures unstable across
 identical reruns (ARI $<0.9$ after flaky-test masking)---would mean the meaning
 classes, and with them every $\Hk$, are ill-defined and would require redefining the
-instrument before any curve is interpretable.
+instrument before any curve is interpretable. A property logically separate from
+suite stability concerns the clustering map \emph{itself}: given fixed behavioral
+signatures, assigning patches to classes is a pure grouping of identical per-test
+outcome vectors, carrying no learned text-similarity weights or model version that
+could drift between runs---unlike NLI- or embedding-based clustering on raw code,
+which is both weak and nondeterministic on
+programs~\citep{fase2026,funcentropy2026,symbolicclust2025}. The partition is
+therefore \emph{label-invariant}: reclustering the same patch set under a shuffled
+input order returns identical class assignments up to relabeling, and pinning the
+SWE-bench-Verified test-image digests (manifest released with the config card below)
+fixes the outcome vectors---and hence the partition---across machines. This
+order-invariance holds by construction and is strictly \emph{weaker} than the
+across-rerun ARI check above (it presumes stable signatures rather than establishing
+them); the sole completed run, with a single behavioral class, satisfies it vacuously
+($100\%$ label agreement, degenerate ARI), so it corroborates the
+determinism-by-construction claim but supplies no evidence on the suite-stability one.
+(ix) \emph{Estimator reproducibility
+(config card)}: every $\Hk$ point depends on free parameters that prose
+under-specifies---$M$ (continuations per prefix), decoding parameters ($T$, top-$p$,
+max steps), the model checkpoint hashes, the prefix-fixing forcing operator, the
+step-segmentation rule, and the per-instance seeds. Mirroring the practice of
+releasing the bidirectional-entailment clustering protocol as the reference
+instrument for discrete semantic
+entropy~\citep{farquhar2024semantic,kuhn2023semantic}, we pre-register an
+\emph{estimator-config card}: a versioned \texttt{estimator.yaml} (the parameters
+above plus checkpoint SHA256s and the forcing-operator version), a
+\texttt{seeds.jsonl} manifest, and a deterministic single-instance replay script
+that recomputes each $\Hk$ from cached resamples and asserts agreement within the
+Miller--Madow band of Eq.~\eqref{eq:mm}; the card is fixed and timestamped before the
+run, and entropies are never compared across different realized $M$
+(Eq.~\eqref{eq:estimator}). The pre-registered claim is that a third party
+re-running from the released card recovers every $\Hk$ within $\pm$one Miller--Madow
+correction unit. Honesty bounds what is \emph{shown}: the sole completed run is
+degenerate ($\hat K=1$, $\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction), so
+replay recovers $\Hk=0$ trivially and exercises only pipeline determinism---not the
+within-band recovery of a \emph{non-zero} entropy, which awaits an instance with
+$\hat K\ge2$. The reproducibility claim is therefore pre-registered, not yet
+demonstrated on a non-degenerate curve. The falsifier is sharp: if two runs from the
+same card produce $\Hk$ points whose discrepancy exceeds the Miller--Madow band on
+any $k$, the configuration is under-specified and the card must be tightened before
+any curve is reported.
 
 \begin{figure}[t]
 \centering
@@ -756,12 +929,30 @@ the commitment hypothesis---we ran it on a single instance
 (\texttt{sympy\_\_sympy-22714}) with behavioral-signature clustering. The run
 exercises the full behavioral pipeline end-to-end (prefix replay $\to$ continuation
 resampling $\to$ test-outcome-signature clustering), confirming the estimator
-executes on a real instance; it supplies no diversity signal. The estimate
+executes on a real instance; it supplies no diversity signal. Read through the
+behavioral instrument (\S\ref{sec:instrument}), the run recovered exactly
+\emph{one} behavioral outcome class at $k\!=\!0$: the deterministic
+patch~$\to$~outcome-vector map (non-applying patches routed to their explicit
+distinct class) executed end-to-end with no learned text-similarity in the loop,
+but on this single instance it did \emph{not} exhibit the multi-class resolution
+($\geq\!2$ classes) the measure needs to localize a window. We read this as an
+honest null at $n\!=\!1$---consistent both with an early-committing problem and
+with a mode-collapsed model, and not by itself evidence that the instrument cannot
+resolve outcome entropy on instances with genuinely distinct viable fixes; the
+per-completion split between the single behavioral class and the non-applying class
+was not separately logged for this run and is added to the artifact tally as the
+instance count grows (\S\ref{sec:protocol}). The estimate
 is $f^\ast=0$: at every measured prefix fraction ($k/T\in\{0.0,0.5,0.9\}$) the
 Miller--Madow-corrected conditional outcome entropy is
 $\widehat{H}_{\mathrm{MM}}(\strat\mid\prefix)=0$, i.e.\ the resampled continuations
 already collapse to a single behavioral outcome class at the earliest measured
-prefix, so the natural support never exceeds one. We report this only to fix the
+prefix, so the natural support never exceeds one. With $\hat K=1$ the Miller--Madow
+term $(\hat K-1)/(2M)$ vanishes (Eq.~\eqref{eq:mm}), so the corrected and raw plug-in
+values coincide on this run and the bias correction is not exercised here. The
+per-point paired bootstrap interval ($B=2000$, resampling the $M$ continuations with
+replacement) is correspondingly degenerate, $[0,0]$: every replicate of a
+single-class sample recovers $\hat K=1$ and hence $\widehat H_{\mathrm{MM}}=0$, so
+the interval certifies the null without itself testing the correction. We report this only to fix the
 estimator's behavior and explicitly read it as a \emph{null}: with $n=1$ instance
 and a single model it cannot separate an early-committing \emph{problem} from a
 mode-collapsed \emph{model} (\S\ref{sec:landscape})---the precise confound the
@@ -805,6 +996,37 @@ about commitment from this point.
 \bibitem{wang2025highentropy} S.~Wang, L.~Yu, C.~Gao, C.~Zheng, S.~Liu, et al. Beyond the 80/20 Rule: High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning. \emph{arXiv:2506.01939}, 2025.
 \bibitem{lin2024critical} Z.~Lin, T.~Liang, J.~Xu, Q.~Lin, X.~Wang, R.~Luo, C.~Shi, S.~Li, Y.~Yang, Z.~Tu. Critical Tokens Matter: Token-Level Contrastive Estimation Enhances LLM's Reasoning Capability. \emph{arXiv:2411.19943}, 2024.
 \bibitem{jia2025globalforking} S.~Jia, X.~Wang, S.~P.~Kasiviswanathan. Training Large Language Models To Reason In Parallel With Global Forking Tokens. \emph{arXiv:2510.05132}, 2025.
+\bibitem{fase2026} FASE: Functional/execution-based semantic entropy for code (clustering by behavior rather than text). \emph{arXiv:2606.09800}, 2026.
+\bibitem{funcentropy2026} Functional Entropy: behavioral-equivalence clustering of code outputs by execution outcome. \emph{arXiv:2605.28500}, 2026.
+\bibitem{symbolicclust2025} Symbolic/execution-based clustering for code, showing NLI and text-similarity clustering is weak and nondeterministic on programs. \emph{arXiv:2502.11620}, 2025.
 \end{thebibliography}
+
+
+\paragraph{Bias order and the pre-registered coverage criterion (not yet exercised).}
+The Miller--Madow term $(\hat K-1)/2M$ in Eq.~\eqref{eq:mm} corrects only the
+\emph{leading} $O(1/M)$ bias of the plug-in entropy; a residual of order
+$O(\hat K/M^2)$ survives the correction~\citep{cover2006elements}, and whether it
+matters at our operating $M$ is an empirical question rather than an assumption. We
+therefore sharpen the synthetic check of \S\ref{sec:replay} into a \emph{quantitative,
+two-part} acceptance test on outcome distributions with a known number of classes
+$K$ and known true entropy $H$: drawing $M\in\{5,10,20,40\}$ samples per setting we
+require (a) that the empirical bias of the \emph{raw} plug-in estimate match the
+predicted $-(K-1)/2M$ to within Monte-Carlo error---confirming we have identified the
+leading term being corrected---and (b) that the \emph{Miller--Madow-corrected}
+estimate fall within its $B=2000$ paired-bootstrap $95\%$ CI of the true $H$ for
+$M\ge20$, with CI coverage $\ge0.9$ aggregated across settings. Throughout we forbid
+any cross-prefix comparison at unequal realized $M$ (Eq.~\eqref{eq:estimator}), since
+the surviving $O(\hat K/M^2)$ residual is itself $M$-dependent and would otherwise
+masquerade as a change in commitment. If coverage stays $<0.9$ at $M=40$, or if
+applying the correction moves a detected collapse location, the analytic term is
+declared inadequate and we escalate to a jackknife/NSB estimator before interpreting
+any commitment curve, consistent with the discrete-semantic-entropy practice of
+reporting the estimator alongside its classes~\citep{farquhar2024semantic,kuhn2023semantic}.
+The sole completed run supplies no leverage on either part: with a single behavioral
+class ($\hat K=1$, $\widehat{H}_{\mathrm{MM}}=0$ at every measured fraction,
+$n\!=\!1$ on \texttt{sympy-22714}) the correction term $(\hat K-1)/2M$ is identically
+zero and the true entropy is itself $0$, so neither the leading-term fit nor the
+coverage criterion is exercised, and the bias control stands pre-registered, not
+tested.
 
 \end{document}
