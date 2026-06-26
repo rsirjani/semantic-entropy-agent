@@ -41,7 +41,7 @@ import copy
 import logging
 
 from minisweagent.environments.docker import DockerEnvironment
-from minisweagent.models.litellm_textbased import LitellmTextbasedModel
+from minisweagent.models.litellm_textbased_model import LitellmTextbasedModel
 from minisweagent.exceptions import LimitsExceeded, FormatError, InterruptAgentFlow, Submitted
 from src.agent.branching_agent import BranchingAgent
 from src.evaluation.dataset import load_swebench_instances
