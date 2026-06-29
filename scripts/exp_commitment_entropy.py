@@ -23,6 +23,7 @@ import argparse
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -108,6 +109,24 @@ def run_to_completion(agent, max_steps):
         if agent.is_finished():
             break
     return capture_patch(agent, submitted_patch)
+
+
+def teardown_env(env):
+    """Force-remove the agent container, cross-platform. minisweagent's cleanup()
+    uses a Unix-only shell command (`timeout .. stop || rm -f .. >/dev/null 2>&1 &`)
+    that is a no-op on Windows, AND build_env_config overrides the image's default
+    `--rm`, so containers leak (45+ "Up" containers -> OOM). Here we capture the
+    container_id and `docker rm -f` it directly via subprocess (no shell)."""
+    cid = getattr(env, "container_id", None)
+    try:
+        env.cleanup()
+    except Exception:
+        pass
+    if cid:
+        try:
+            subprocess.run(["docker", "rm", "-f", cid], capture_output=True, timeout=60)
+        except Exception:
+            pass
 
 
 def capture_patch(agent, submitted_patch=None):
@@ -290,10 +309,7 @@ def main():
     run_to_completion(ref_agent, args.max_steps)
     ref_contents = assistant_contents(ref_agent)
     L = len(ref_contents)
-    try:
-        ref_env.cleanup()
-    except Exception:
-        pass
+    teardown_env(ref_env)
     logger.info(f"[{args.instance}] reference length = {L} steps")
     if L < 4:
         logger.error("reference too short; aborting")
@@ -315,10 +331,7 @@ def main():
             patches.append(patch)
             logger.info(f"[{args.instance}] k={k}({frac:.2f}) cont {m+1}/{args.m}: "
                         f"{len(patch)} chars")
-            try:
-                env.cleanup()
-            except Exception:
-                pass
+            teardown_env(env)
 
         # Outcome entropy under the selected meaning relation.
         if args.cluster == "behavioral":
