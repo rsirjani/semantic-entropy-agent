@@ -80,31 +80,62 @@ def make_agent(config, instance, temperature):
 
 
 def run_to_completion(agent, max_steps):
-    """Greedy/sampled agent loop until submit / limit. Returns final patch."""
+    """Sampled agent loop until submit / limit. Returns final patch.
+
+    RESILIENT like the working phased_orchestrator: a malformed action (FormatError)
+    or a transient step error feeds an error observation back and the agent RETRIES,
+    rather than killing the whole rollout. At T>0 the model emits malformed actions
+    often; breaking on the first one (the old behavior) ended most continuations
+    with an empty patch -> degenerate curves."""
     steps = 0
     submitted_patch = None
+    transient_errs = 0
+    MAX_TRANSIENT = 8
     while steps < max_steps:
         try:
             msg = agent.query_only()
-        except (LimitsExceeded, FormatError):
+        except LimitsExceeded:
             break
+        except FormatError as e:
+            try:
+                agent.add_messages(*getattr(e, "messages", []) or [])
+            except Exception:
+                pass
+            steps += 1
+            transient_errs += 1
+            if transient_errs > MAX_TRANSIENT:
+                break
+            continue
         try:
             agent.execute_response(msg)
+            transient_errs = 0
         except Submitted as e:
-            # The submitted patch lives in the exception (mirrors the working
-            # phased_orchestrator path); just breaking here would discard it and
-            # leave only the git-diff fallback -> empty patches.
+            # The submitted patch lives in the exception (mirrors the working path);
+            # breaking without grabbing it would leave only the git-diff fallback.
             try:
                 msgs = getattr(e, "messages", None) or []
                 submitted_patch = msgs[0].get("extra", {}).get("submission", "") if msgs else ""
             except Exception:
                 submitted_patch = ""
             break
-        except InterruptAgentFlow:
-            pass
+        except InterruptAgentFlow as e:
+            try:
+                agent.add_messages(*getattr(e, "messages", []) or [])
+            except Exception:
+                pass
+        except FormatError as e:
+            try:
+                agent.add_messages(*getattr(e, "messages", []) or [])
+            except Exception:
+                pass
+            transient_errs += 1
+            if transient_errs > MAX_TRANSIENT:
+                break
         except Exception as e:
             logger.warning(f"step error: {e}")
-            break
+            transient_errs += 1
+            if transient_errs > MAX_TRANSIENT:
+                break
         steps += 1
         if agent.is_finished():
             break
